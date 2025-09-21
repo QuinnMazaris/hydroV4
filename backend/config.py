@@ -1,0 +1,41 @@
+from pydantic_settings import BaseSettings
+from typing import Optional
+import os
+
+class Settings(BaseSettings):
+    # MQTT Configuration
+    mqtt_broker: str = "localhost"
+    mqtt_port: int = 1883
+    mqtt_username: Optional[str] = None
+    mqtt_password: Optional[str] = None
+    mqtt_keepalive: int = 60
+    mqtt_qos: int = 1
+
+    # Topic Configuration
+    mqtt_base_topic: str = "esp32"
+    sensor_data_topic: str = "esp32/data"
+    relay_status_topic: str = "esp32/relay/status"
+    relay_control_topic: str = "esp32/relay/control"
+
+    # Database Configuration
+    database_url: str = "sqlite+aiosqlite:///./hydro.db"
+
+    # API Configuration
+    api_host: str = "0.0.0.0"
+    api_port: int = 8000
+
+    # Sensor Discovery Configuration
+    sensor_discovery_timeout: int = 300  # 5 minutes
+    sensor_heartbeat_interval: int = 60  # 1 minute
+
+    # Data Retention
+    data_retention_days: int = 30
+
+    # Logging
+    log_level: str = "INFO"
+
+    class Config:
+        env_file = ".env"
+        case_sensitive = False
+
+settings = Settings()
