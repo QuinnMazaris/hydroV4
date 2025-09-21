@@ -1,10 +1,7 @@
-"""
-Unified backend entrypoint.
-Starts the FastAPI app, which on startup initializes the DB, connects MQTT,
-and starts the MQTT message processor.
-"""
+"""Unified backend entrypoint running the FastAPI app via Uvicorn."""
 
 import uvicorn
+
 from .config import settings
 
 
@@ -19,5 +16,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
-

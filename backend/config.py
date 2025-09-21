@@ -16,6 +16,8 @@ class Settings(BaseSettings):
     sensor_data_topic: str = "esp32/data"
     relay_status_topic: str = "esp32/relay/status"
     relay_control_topic: str = "esp32/relay/control"
+    discovery_request_topic: str = "esp32/discovery/request"
+    discovery_response_topic: str = "esp32/+/discovery"
 
     # Database Configuration
     database_url: str = "sqlite+aiosqlite:///./hydro.db"

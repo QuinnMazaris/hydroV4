@@ -9,12 +9,30 @@ export type DeviceLatest = {
   metrics: Record<string, number>
 }
 
-export type DevicesMap = Record<string, { device_type?: string; is_active?: boolean; last_seen?: number | null }>
+export type MetricMeta = { label?: string; unit?: string; color?: string }
+
+export type DataError = {
+  code?: string
+  message: string
+  context?: Record<string, unknown>
+  ts: number
+}
+
+export type DeviceInfo = {
+  device_type?: string
+  is_active?: boolean
+  last_seen?: number | null
+  metrics?: Record<string, MetricMeta>
+  actuators?: Array<Record<string, any>>
+}
+
+export type DevicesMap = Record<string, DeviceInfo>
 
 type IncomingEvent =
   | { type: "snapshot"; devices: DevicesMap; latest: Record<string, DeviceLatest>; ts: number }
-  | { type: "device"; device_id: string; device_type?: string; is_active?: boolean; last_seen?: number }
+  | { type: "device"; device_id: string; device_type?: string; is_active?: boolean; last_seen?: number; metrics?: Record<string, MetricMeta>; actuators?: Array<Record<string, any>> }
   | { type: "reading"; device_id: string; timestamp: number; metrics: Record<string, number> }
+  | { type: "error"; code?: string; message: string; context?: Record<string, unknown>; ts?: number }
 
 export function useWsMetrics(options?: {
   url?: string
@@ -29,6 +47,7 @@ export function useWsMetrics(options?: {
   const [devices, setDevices] = useState<DevicesMap>({})
   const [snapshot, setSnapshot] = useState<Record<string, Record<string, MetricPoint[]>>>({})
   const [status, setStatus] = useState<"connecting" | "live" | "disconnected">("connecting")
+  const [errors, setErrors] = useState<DataError[]>([])
   const throttleRef = useRef<number | null>(null)
   const wsRef = useRef<WebSocket | null>(null)
 
@@ -62,9 +81,20 @@ export function useWsMetrics(options?: {
           try {
             const ev: IncomingEvent = JSON.parse(e.data)
             if (ev.type === "snapshot") {
-              // seed devices
-              setDevices((prev) => ({ ...prev, ...ev.devices }))
-              // seed latest into buffers
+              setDevices((prev) => {
+                const next = { ...prev }
+                for (const [deviceId, info] of Object.entries(ev.devices || {})) {
+                  const current = next[deviceId] || {}
+                  next[deviceId] = {
+                    ...current,
+                    ...info,
+                    metrics: { ...(current.metrics || {}), ...(info.metrics || {}) },
+                    actuators: info.actuators ?? current.actuators,
+                    last_seen: info.last_seen ?? current.last_seen ?? null,
+                  }
+                }
+                return next
+              })
               const buffers = buffersRef.current
               for (const [deviceId, latest] of Object.entries(ev.latest || {})) {
                 const series = (buffers[deviceId] ||= {})
@@ -77,15 +107,30 @@ export function useWsMetrics(options?: {
               }
               scheduleCommit()
             } else if (ev.type === "device") {
-              setDevices((prev) => ({
-                ...prev,
-                [ev.device_id]: {
-                  ...(prev[ev.device_id] || {}),
-                  device_type: ev.device_type ?? prev[ev.device_id]?.device_type,
-                  is_active: ev.is_active ?? prev[ev.device_id]?.is_active,
-                  last_seen: ev.last_seen ?? prev[ev.device_id]?.last_seen ?? null,
-                },
-              }))
+              setDevices((prev) => {
+                const current = prev[ev.device_id] || {}
+                return {
+                  ...prev,
+                  [ev.device_id]: {
+                    ...current,
+                    device_type: ev.device_type ?? current.device_type,
+                    is_active: ev.is_active ?? current.is_active,
+                    last_seen: ev.last_seen ?? current.last_seen ?? null,
+                    metrics: { ...(current.metrics || {}), ...(ev.metrics || {}) },
+                    actuators: ev.actuators ?? current.actuators,
+                  },
+                }
+              })
+            } else if (ev.type === "error") {
+              setErrors((prev) => {
+                const next = [...prev, {
+                  code: ev.code,
+                  message: ev.message,
+                  context: ev.context,
+                  ts: ev.ts ?? Date.now(),
+                }]
+                return next.slice(-20)
+              })
             } else if (ev.type === "reading") {
               const buffers = buffersRef.current
               const series = (buffers[ev.device_id] ||= {})
@@ -129,7 +174,7 @@ export function useWsMetrics(options?: {
     }
   }, [resolvedUrl, maxPointsPerSeries, fps])
 
-  const api = useMemo(() => ({ metricsByDevice: snapshot, devices, status }), [snapshot, devices, status])
+  const api = useMemo(() => ({ metricsByDevice: snapshot, devices, status, errors }), [snapshot, devices, status, errors])
   return api
 }
 

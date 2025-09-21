@@ -1,22 +1,29 @@
-from fastapi import FastAPI, Depends, HTTPException, BackgroundTasks
-from fastapi import WebSocket, WebSocketDisconnect
-from fastapi.responses import JSONResponse
-from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, desc, func
-from typing import List, Optional, Dict, Any
-from datetime import datetime, timedelta
 import asyncio
+from contextlib import suppress
+from datetime import datetime, timedelta
+from typing import Any, Dict, List, Optional
 
-from .database import get_db, init_db, AsyncSessionLocal
+from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException
+from fastapi import WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import desc, func, select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from .config import settings
+from .database import AsyncSessionLocal, get_db, init_db
+from .events import event_broker
 from .models import (
-    Device, SensorReading, ActuatorState,
-    DeviceResponse, SensorReadingResponse, ActuatorStateResponse,
-    RelayControl, RelayStatus
+    ActuatorState,
+    ActuatorStateResponse,
+    Device,
+    DeviceResponse,
+    RelayControl,
+    RelayStatus,
+    SensorReading,
+    SensorReadingResponse,
 )
 from .mqtt_client import mqtt_client
-from .config import settings
-from .events import event_broker
+from .services.persistence import delete_old_readings
 
 app = FastAPI(title="Hydroponic System API", version="1.0.0")
 
@@ -37,25 +44,51 @@ async def startup_event():
     # Start async processor for queued MQTT messages
     await mqtt_client.start_message_processor()
 
-    # Start background tasks
-    asyncio.create_task(device_heartbeat_task())
+    mqtt_client.request_discovery_broadcast()
 
-    # Warm event stream with initial snapshot periodically (optional)
+    app.state.maintenance_task = asyncio.create_task(maintenance_loop())
+
 
 @app.on_event("shutdown")
 async def shutdown_event():
     """Cleanup on shutdown"""
+    task = getattr(app.state, "maintenance_task", None)
+    if task:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+        app.state.maintenance_task = None
     await mqtt_client.disconnect()
 
-async def device_heartbeat_task():
-    """Background task to check device heartbeats"""
+
+async def maintenance_loop():
+    """Background task handling device heartbeat checks, data retention, and capability refresh."""
+    last_cleanup = datetime.utcnow()
+    cleanup_interval = timedelta(hours=24)
+    discovery_interval = timedelta(seconds=max(120, settings.sensor_discovery_timeout))
+    last_discovery = datetime.utcnow()
     while True:
         try:
             await mqtt_client.mark_inactive_devices()
+
+            now = datetime.utcnow()
+            if settings.data_retention_days > 0 and (now - last_cleanup) >= cleanup_interval:
+                cutoff = now - timedelta(days=settings.data_retention_days)
+                await delete_old_readings(cutoff)
+                last_cleanup = now
+
+            if (now - last_discovery) >= discovery_interval:
+                mqtt_client.request_discovery_broadcast()
+                last_discovery = now
+
             await asyncio.sleep(settings.sensor_heartbeat_interval)
-        except Exception as e:
-            print(f"Error in heartbeat task: {e}")
+        except asyncio.CancelledError:
+            break
+        except Exception as exc:
+            print(f"Error in maintenance loop: {exc}")
             await asyncio.sleep(settings.sensor_heartbeat_interval)
+
+
 
 
 # ---------------- WebSocket live metrics ---------------- #
@@ -97,6 +130,20 @@ async def ws_metrics(websocket: WebSocket):
         event_broker.unsubscribe(queue)
 
 
+SENSOR_FIELD_EXCLUDES = {"id", "device_id", "timestamp", "raw_data"}
+
+def reading_to_metric_payload(reading: SensorReading) -> Dict[str, Any]:
+    metrics: Dict[str, Any] = {}
+    for column in SensorReading.__table__.columns:
+        if column.name in SENSOR_FIELD_EXCLUDES:
+            continue
+        value = getattr(reading, column.name)
+        if value is not None:
+            metrics[column.name] = value
+    return metrics
+
+
+
 async def build_initial_snapshot():
     """Build a snapshot of active devices and their latest reading values."""
     devices: Dict[str, Any] = {}
@@ -108,7 +155,9 @@ async def build_initial_snapshot():
         devices[device_id] = {
             "device_type": info.get("device_type", "sensor"),
             "is_active": info.get("is_active", True),
-            "last_seen": int(info.get("last_seen").timestamp() * 1000) if info.get("last_seen") else None,
+            "last_seen": info.get("last_seen"),
+            "metrics": info.get("metrics", {}),
+            "actuators": info.get("actuators", []),
         }
 
     # Query latest DB values per device
@@ -139,20 +188,7 @@ async def build_initial_snapshot():
             for r in rows:
                 latest[r.device_id] = {
                     "timestamp": int(r.timestamp.timestamp() * 1000),
-                    "metrics": {
-                        k: v for k, v in {
-                            "temperature": r.temperature,
-                            "pressure": r.pressure,
-                            "humidity": r.humidity,
-                            "gas_kohms": r.gas_kohms,
-                            "lux": r.lux,
-                            "water_temp_c": r.water_temp_c,
-                            "tds_ppm": r.tds_ppm,
-                            "ph": r.ph,
-                            "distance_mm": r.distance_mm,
-                            "vpd_kpa": r.vpd_kpa,
-                        }.items() if v is not None
-                    }
+                    "metrics": reading_to_metric_payload(r),
                 }
     except Exception:
         pass
@@ -257,19 +293,11 @@ async def get_sensor_summary(db: AsyncSession = Depends(get_db)):
     result = await db.execute(query)
     latest_readings = result.scalars().all()
 
-    summary = {}
+    summary: Dict[str, Any] = {}
     for reading in latest_readings:
         summary[reading.device_id] = {
             "timestamp": reading.timestamp,
-            "temperature": reading.temperature,
-            "humidity": reading.humidity,
-            "pressure": reading.pressure,
-            "ph": reading.ph,
-            "tds_ppm": reading.tds_ppm,
-            "water_temp_c": reading.water_temp_c,
-            "lux": reading.lux,
-            "vpd_kpa": reading.vpd_kpa,
-            "distance_mm": reading.distance_mm
+            **reading_to_metric_payload(reading),
         }
 
     return summary
@@ -323,31 +351,31 @@ async def get_relay_status(
     db: AsyncSession = Depends(get_db)
 ):
     """Get current status of all relays for a device"""
-    # Get latest state for each relay
-    relay_states = {}
+    relay_states: Dict[int, str] = {}
 
-    for relay_num in range(1, 17):
-        result = await db.execute(
-            select(ActuatorState)
-            .where(
-                (ActuatorState.device_id == device_id) &
-                (ActuatorState.actuator_type == "relay") &
-                (ActuatorState.actuator_number == relay_num)
-            )
-            .order_by(desc(ActuatorState.timestamp))
-            .limit(1)
+    query = (
+        select(ActuatorState)
+        .where(
+            (ActuatorState.device_id == device_id)
+            & (ActuatorState.actuator_type == "relay")
         )
-        state = result.scalar_one_or_none()
+        .order_by(ActuatorState.actuator_number, desc(ActuatorState.timestamp))
+    )
 
-        if state:
-            relay_states[f"relay{relay_num}"] = state.state
-        else:
-            relay_states[f"relay{relay_num}"] = "unknown"
+    result = await db.execute(query)
+    for state in result.scalars():
+        if state.actuator_number not in relay_states:
+            relay_states[state.actuator_number] = state.state
+
+    relays_payload = {
+        f"relay{relay_num}": relay_states.get(relay_num, "unknown")
+        for relay_num in range(1, 17)
+    }
 
     return {
         "device_id": device_id,
-        "relays": relay_states,
-        "timestamp": datetime.utcnow()
+        "relays": relays_payload,
+        "timestamp": datetime.utcnow(),
     }
 
 # Analytics endpoints
@@ -361,7 +389,11 @@ async def get_sensor_trends(
 ):
     """Get sensor trends for analytics"""
     # Validate metric
-    valid_metrics = ["temperature", "humidity", "pressure", "ph", "tds_ppm", "water_temp_c", "lux", "vpd_kpa"]
+    valid_metrics = [
+        column.name
+        for column in SensorReading.__table__.columns
+        if column.name not in SENSOR_FIELD_EXCLUDES
+    ]
     if metric not in valid_metrics:
         raise HTTPException(status_code=400, detail=f"Invalid metric. Must be one of: {valid_metrics}")
 

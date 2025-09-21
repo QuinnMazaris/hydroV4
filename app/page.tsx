@@ -1,18 +1,22 @@
 "use client"
 
 import type React from "react"
+import { useMemo, useState } from "react"
 
-import { useMemo } from "react"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
-import { LineChart, Line, XAxis, YAxis, ResponsiveContainer, Tooltip } from "recharts"
+import { Button } from "@/components/ui/button"
+import { LineChart, Line, XAxis, YAxis, ResponsiveContainer } from "recharts"
 import { Activity, ChevronRight } from "lucide-react"
+
+import { describeValue, resolveMetricMeta } from "@/lib/metrics"
 import { useWsMetrics } from "@/hooks/use-ws-metrics"
+import type { DeviceInfo } from "@/hooks/use-ws-metrics"
 
 interface MetricCardProps {
   title: string
-  value: string | number
-  change: string
+  valueLabel: string
+  changeLabel: string
   trend: "up" | "down" | "neutral"
   icon: React.ReactNode
   data: Array<{ time: string; value: number; timestamp: number }>
@@ -20,7 +24,7 @@ interface MetricCardProps {
   yDomain?: [number, number]
 }
 
-function MetricCard({ title, value, change, trend, icon, data, color, yDomain }: MetricCardProps) {
+function MetricCard({ title, valueLabel, changeLabel, trend, icon, data, color, yDomain }: MetricCardProps) {
   return (
     <Card className="bg-card/50 backdrop-blur-sm border-border/50 hover:bg-card/70 transition-all duration-200">
       <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
@@ -29,12 +33,12 @@ function MetricCard({ title, value, change, trend, icon, data, color, yDomain }:
       </CardHeader>
       <CardContent>
         <div className="flex items-center justify-between mb-4">
-          <div className="text-2xl font-bold text-foreground font-mono">{value}</div>
+          <div className="text-2xl font-bold text-foreground font-mono">{valueLabel}</div>
           <Badge
             variant={trend === "up" ? "default" : trend === "down" ? "destructive" : "secondary"}
             className="text-xs"
           >
-            {change}
+            {changeLabel}
           </Badge>
         </div>
         <div className="h-16 w-full">
@@ -42,28 +46,15 @@ function MetricCard({ title, value, change, trend, icon, data, color, yDomain }:
             <LineChart data={data}>
               <YAxis hide domain={yDomain ? yDomain : ["auto", "auto"]} />
               <XAxis hide dataKey="time" />
-              <Tooltip
-                isAnimationActive={false}
-                cursor={{ stroke: "oklch(0.22 0 0)", strokeWidth: 1 }}
-                contentStyle={{
-                  backgroundColor: "oklch(0.12 0 0)",
-                  border: "1px solid oklch(0.22 0 0)",
-                  borderRadius: "8px",
-                  color: "oklch(0.98 0 0)",
-                  padding: "6px 8px",
-                }}
-                labelFormatter={(label) => label as string}
-                formatter={(v) => [typeof v === "number" ? v.toFixed(2) : String(v), "Value"]}
-              />
               <Line
                 type="monotone"
                 dataKey="value"
                 stroke={color}
                 strokeWidth={2}
                 dot={false}
+                activeDot={false}
                 strokeLinecap="round"
                 isAnimationActive={false}
-                activeDot={{ r: 3 }}
               />
             </LineChart>
           </ResponsiveContainer>
@@ -74,34 +65,92 @@ function MetricCard({ title, value, change, trend, icon, data, color, yDomain }:
 }
 
 export default function Dashboard() {
-  const { metricsByDevice, devices, status } = useWsMetrics()
+  const { metricsByDevice, devices, status, errors } = useWsMetrics()
   const timeWindowMs = 24 * 60 * 60 * 1000
 
-  const metricDisplayName = (name: string) =>
-    name
-      .replace(/_/g, " ")
-      .replace(/\b\w/g, (m) => m.toUpperCase())
+  const formatRelativeTime = (timestamp?: number | null) => {
+    if (!timestamp) return "Unknown"
+    const deltaMs = Date.now() - timestamp
+    if (deltaMs < 60_000) return "Just now"
+    const minutes = Math.floor(deltaMs / 60_000)
+    if (minutes < 60) return `${minutes} min ago`
+    const hours = Math.floor(minutes / 60)
+    if (hours < 24) return `${hours} hr${hours > 1 ? "s" : ""} ago`
+    const days = Math.floor(hours / 24)
+    return `${days} day${days > 1 ? "s" : ""} ago`
+  }
 
-  const metricColor = (name: string) => {
-    switch (name) {
-      case "temperature":
-      case "water_temp_c":
-        return "oklch(0.7 0.15 142)"
-      case "humidity":
-        return "oklch(0.65 0.18 220)"
-      case "pressure":
-      case "vpd_kpa":
-        return "oklch(0.75 0.12 60)"
-      case "ph":
-        return "oklch(0.65 0.2 25)"
-      case "tds_ppm":
-        return "oklch(0.68 0.16 300)"
-      case "lux":
-        return "oklch(0.72 0.14 180)"
-      default:
-        return "oklch(0.7 0.15 142)"
+
+  type ActuatorInfo = NonNullable<DeviceInfo['actuators']>[number]
+
+  const [actuatorBusy, setActuatorBusy] = useState<Record<string, boolean>>({})
+
+  const actuatorDevices = useMemo(() => {
+    return Object.entries(devices)
+      .map(([deviceId, info]) => {
+        const actuators = (info.actuators || []) as ActuatorInfo[]
+        return {
+          deviceId,
+          deviceType: info.device_type || 'sensor',
+          actuators: actuators.filter(Boolean),
+        }
+      })
+      .filter((entry) => entry.actuators.length > 0)
+      .sort((a, b) => a.deviceId.localeCompare(b.deviceId))
+  }, [devices])
+
+  const recentErrors = useMemo(() => errors.slice(-5).reverse(), [errors])
+
+  const handleActuatorToggle = async (deviceId: string, actuator: ActuatorInfo) => {
+    if (!actuator || actuator.type !== 'relay' || typeof actuator.number !== 'number') {
+      console.warn('Unsupported actuator command', deviceId, actuator)
+      return
+    }
+    const key = `${deviceId}:${actuator.number}`
+    setActuatorBusy((prev) => ({ ...prev, [key]: true }))
+    const currentState = typeof actuator.state === 'string' ? actuator.state.toLowerCase() : 'unknown'
+    const nextState = currentState === 'on' ? 'off' : 'on'
+
+    try {
+      const res = await fetch(`/api/actuators/${deviceId}/relay/control`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ relay: actuator.number, state: nextState }),
+      })
+      if (!res.ok) {
+        const message = await res.text()
+        throw new Error(message || 'Failed to send relay command')
+      }
+    } catch (error) {
+      console.error('Failed to send relay command', error)
+      if (typeof window !== 'undefined') {
+        window.alert?.('Failed to send relay command.')
+      }
+    } finally {
+      setActuatorBusy((prev) => {
+        const next = { ...prev }
+        delete next[key]
+        return next
+      })
     }
   }
+
+  const deviceActivities = useMemo(() => {
+    const now = Date.now()
+    const items = Object.entries(devices).map(([deviceId, info]) => {
+      const lastSeen = info.last_seen ?? null
+      return {
+        deviceId,
+        deviceType: info.device_type || "sensor",
+        isActive: info.is_active ?? false,
+        lastSeen,
+        ageMs: lastSeen ? now - lastSeen : Number.POSITIVE_INFINITY,
+      }
+    })
+
+    items.sort((a, b) => a.ageMs - b.ageMs)
+    return items.slice(0, 6)
+  }, [devices])
 
   const cards = useMemo(() => {
     const now = Date.now()
@@ -109,8 +158,8 @@ export default function Dashboard() {
     const results: Array<{
       key: string
       title: string
-      value: string | number
-      change: string
+      valueLabel: string
+      changeLabel: string
       trend: "up" | "down" | "neutral"
       icon: React.ReactNode
       data: Array<{ time: string; value: number; timestamp: number }>
@@ -122,12 +171,14 @@ export default function Dashboard() {
       Object.entries(seriesMap).forEach(([metricName, series]) => {
         const filtered = series.filter((p) => p.timestamp >= start)
         if (filtered.length === 0) return
+
+        const deviceMeta = devices[deviceId]?.metrics?.[metricName]
+        const descriptor = resolveMetricMeta(metricName, deviceMeta)
         const data = filtered.map((p) => ({
           timestamp: p.timestamp,
           value: p.value,
           time: new Date(p.timestamp).toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" }),
         }))
-        // Compute Y domain with padding for visibility
         const values = filtered.map((p) => p.value)
         const minVal = Math.min(...values)
         const maxVal = Math.max(...values)
@@ -138,24 +189,27 @@ export default function Dashboard() {
         const last = filtered[filtered.length - 1]?.value ?? 0
         const diff = last - first
         const pct = first !== 0 ? (diff / first) * 100 : 0
+        const rounded = Number.isInteger(last) ? last : parseFloat(last.toFixed(2))
+        const valueLabel = describeValue(rounded, descriptor.unit)
+        const changeLabel = `${pct >= 0 ? "+" : ""}${pct.toFixed(1)}%`
+
         results.push({
           key: `${deviceId}:${metricName}`,
-          title: `${deviceId} · ${metricDisplayName(metricName)}`,
-          value: Number.isInteger(last) ? last : parseFloat(last.toFixed(2)),
-          change: `${pct >= 0 ? "+" : ""}${pct.toFixed(1)}%`,
+          title: `${deviceId} · ${descriptor.label}`,
+          valueLabel,
+          changeLabel,
           trend: pct > 0 ? "up" : pct < 0 ? "down" : "neutral",
           icon: <Activity className="w-4 h-4" />,
           data,
-          color: metricColor(metricName),
+          color: descriptor.color,
           yDomain,
         })
       })
     })
 
-    // Sort for stable rendering: by device then metric
     results.sort((a, b) => a.key.localeCompare(b.key))
     return results
-  }, [metricsByDevice, timeWindowMs])
+  }, [devices, metricsByDevice, timeWindowMs])
 
   // No primary metric chart; sparklines serve as primary visualization
 
@@ -188,8 +242,8 @@ export default function Dashboard() {
             <MetricCard
               key={c.key}
               title={c.title}
-              value={c.value}
-              change={c.change}
+              valueLabel={c.valueLabel}
+              changeLabel={c.changeLabel}
               trend={c.trend}
               icon={c.icon}
               data={c.data}
@@ -200,7 +254,7 @@ export default function Dashboard() {
         </div>
 
         {/* Bottom Section */}
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
           {/* System Status */}
           <Card className="bg-card/50 backdrop-blur-sm border-border/50">
             <CardHeader>
@@ -208,16 +262,19 @@ export default function Dashboard() {
             </CardHeader>
             <CardContent className="space-y-4">
               {Object.entries(devices).map(([deviceId, info]) => (
-                <div key={deviceId} className="flex items-center justify-between p-3 rounded-lg bg-accent/30">
-                  <div className="flex items-center space-x-3">
-                    <div className={`w-2 h-2 rounded-full ${info.is_active ? "bg-chart-1" : "bg-destructive"}`}></div>
-                    <span className="text-sm font-medium text-foreground">{deviceId}</span>
-                  </div>
-                  <div className="flex items-center space-x-2">
-                    <span className="text-xs text-muted-foreground">{info.device_type || "sensor"}</span>
+                <div key={deviceId} className="p-3 rounded-lg bg-accent/30">
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="flex items-center space-x-3">
+                      <div className={`w-2 h-2 rounded-full ${info.is_active ? "bg-chart-1" : "bg-destructive"}`}></div>
+                      <span className="text-sm font-medium text-foreground">{deviceId}</span>
+                    </div>
                     <Badge variant={info.is_active ? "default" : "destructive"} className="text-xs">
                       {info.is_active ? "Active" : "Inactive"}
                     </Badge>
+                  </div>
+                  <div className="mt-2 flex items-center justify-between text-xs text-muted-foreground">
+                    <span className="capitalize">{info.device_type || "sensor"}</span>
+                    <span>{formatRelativeTime(info.last_seen)}</span>
                   </div>
                 </div>
               ))}
@@ -230,36 +287,110 @@ export default function Dashboard() {
               <CardTitle className="text-lg font-semibold text-foreground">Recent Activity</CardTitle>
             </CardHeader>
             <CardContent className="space-y-4">
-              {[
-                { event: "High traffic detected", time: "2 min ago", type: "warning" },
-                { event: "Database backup completed", time: "15 min ago", type: "success" },
-                { event: "New deployment started", time: "32 min ago", type: "info" },
-                { event: "Cache cleared successfully", time: "1 hour ago", type: "success" },
-              ].map((activity, index) => (
-                <div
-                  key={index}
-                  className="flex items-center justify-between p-3 rounded-lg bg-accent/30 hover:bg-accent/50 transition-colors cursor-pointer"
-                >
-                  <div className="flex items-center space-x-3">
+              {deviceActivities.length === 0 ? (
+                <div className="text-sm text-muted-foreground">No recent device activity yet.</div>
+              ) : (
+                deviceActivities.map((activity) => {
+                  const statusColor = activity.isActive
+                    ? "bg-chart-1"
+                    : activity.ageMs < 60 * 60 * 1000
+                      ? "bg-chart-3"
+                      : "bg-destructive"
+
+                  return (
                     <div
-                      className={`w-2 h-2 rounded-full ${
-                        activity.type === "success"
-                          ? "bg-chart-1"
-                          : activity.type === "warning"
-                            ? "bg-chart-3"
-                            : "bg-chart-2"
-                      }`}
-                    ></div>
-                    <span className="text-sm text-foreground">{activity.event}</span>
-                  </div>
-                  <div className="flex items-center space-x-2">
-                    <span className="text-xs text-muted-foreground">{activity.time}</span>
-                    <ChevronRight className="w-3 h-3 text-muted-foreground" />
-                  </div>
-                </div>
-              ))}
+                      key={activity.deviceId}
+                      className="flex items-center justify-between p-3 rounded-lg bg-accent/30 hover:bg-accent/50 transition-colors cursor-pointer"
+                    >
+                      <div className="flex items-center space-x-3">
+                        <div className={`w-2 h-2 rounded-full ${statusColor}`}></div>
+                        <div className="flex flex-col">
+                          <span className="text-sm text-foreground">{activity.deviceId}</span>
+                          <span className="text-xs text-muted-foreground">{activity.deviceType}</span>
+                        </div>
+                      </div>
+                      <div className="flex items-center space-x-2">
+                        <span className="text-xs text-muted-foreground">{formatRelativeTime(activity.lastSeen)}</span>
+                        <ChevronRight className="w-3 h-3 text-muted-foreground" />
+                      </div>
+                    </div>
+                  )
+                })
+              )}
             </CardContent>
           </Card>
+
+          <div className="space-y-6">
+            {recentErrors.length > 0 && (
+              <Card className="bg-card/50 backdrop-blur-sm border-border/50">
+                <CardHeader>
+                  <CardTitle className="text-lg font-semibold text-foreground">Incoming Issues</CardTitle>
+                </CardHeader>
+                <CardContent className="space-y-3">
+                  {recentErrors.map((error, index) => (
+                    <div key={`${error.code || 'error'}:${index}`} className="rounded-md bg-destructive/10 p-3 text-sm">
+                      <div className="flex items-center justify-between">
+                        <span className="font-medium text-destructive">{error.code || 'Unknown data'}</span>
+                        <span className="text-xs text-muted-foreground">{formatRelativeTime(error.ts)}</span>
+                      </div>
+                      <p className="mt-1 text-destructive-foreground">{error.message}</p>
+                    </div>
+                  ))}
+                </CardContent>
+              </Card>
+            )}
+
+            <Card className="bg-card/50 backdrop-blur-sm border-border/50">
+              <CardHeader>
+                <CardTitle className="text-lg font-semibold text-foreground">Device Controls</CardTitle>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                {actuatorDevices.length === 0 ? (
+                  <div className="text-sm text-muted-foreground">Awaiting actuator discovery data.</div>
+                ) : (
+                  actuatorDevices.map(({ deviceId, deviceType, actuators }) => (
+                    <div key={deviceId} className="space-y-2 rounded-lg bg-accent/30 p-3">
+                      <div className="flex items-center justify-between text-sm text-foreground">
+                        <span className="font-medium">{deviceId}</span>
+                        <span className="text-xs text-muted-foreground">{deviceType}</span>
+                      </div>
+                      <div className="space-y-2">
+                        {actuators.map((actuator, index) => {
+                          const busyKey = typeof actuator.number === 'number' ? `${deviceId}:${actuator.number}` : `${deviceId}:${index}`
+                          const busy = actuatorBusy[busyKey] ?? false
+                          const stateLabel = typeof actuator.state === 'string' ? actuator.state : 'unknown'
+                          const stateNormalized = stateLabel.toLowerCase()
+                          const isOn = stateNormalized === 'on'
+                          const label = actuator.label
+                            || (actuator.type === 'relay' && typeof actuator.number === 'number'
+                              ? `Relay ${actuator.number}`
+                              : actuator.id || 'Actuator')
+                          const disabled = actuator.type !== 'relay' || typeof actuator.number !== 'number'
+
+                          return (
+                            <div key={busyKey} className="flex items-center justify-between gap-3 rounded-md bg-card/30 px-3 py-2">
+                              <div className="flex flex-col">
+                                <span className="text-sm text-foreground">{label}</span>
+                                <span className="text-xs text-muted-foreground capitalize">{stateLabel}</span>
+                              </div>
+                              <Button
+                                size="sm"
+                                variant={isOn ? 'destructive' : 'secondary'}
+                                disabled={busy || disabled}
+                                onClick={() => handleActuatorToggle(deviceId, actuator)}
+                              >
+                                {busy ? 'Sending...' : isOn ? 'Turn Off' : 'Turn On'}
+                              </Button>
+                            </div>
+                          )
+                        })}
+                      </div>
+                    </div>
+                  ))
+                )}
+              </CardContent>
+            </Card>
+          </div>
         </div>
       </div>
     </div>
