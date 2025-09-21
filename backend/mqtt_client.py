@@ -220,6 +220,7 @@ class MQTTClient:
                 (f"{settings.mqtt_base_topic}/+/status", settings.mqtt_qos),  # Device status
                 (f"{settings.mqtt_base_topic}/+/data", settings.mqtt_qos),    # Device data
                 (f"{settings.mqtt_base_topic}/+/discovery", settings.mqtt_qos),  # Device capabilities
+                (f"{settings.mqtt_base_topic}/+/relay/status", settings.mqtt_qos),  # Device-specific relay status
             ]
 
             for topic, qos in topics:
@@ -500,27 +501,32 @@ class MQTTClient:
             logger.error(f"Error handling device status: {e}")
 
     async def _handle_dynamic_topic(self, topic: str, data: Dict[str, Any]):
-        """Handle dynamic device topics for autodiscovery"""
+        """Handle dynamic device topics for autodiscovery and status updates"""
         try:
             parts = topic.split('/')
-            if len(parts) >= 3:
-                namespace = parts[0]
-                device_id = parts[1]
-                message_type = parts[2]
+            if len(parts) < 3:
+                return
 
-                if namespace == settings.mqtt_base_topic.split('/')[0]:
-                    if message_type == 'data':
-                        await self._handle_sensor_data(topic, {**data, 'device_id': device_id})
-                    elif message_type == 'status':
-                        await self._handle_device_status(device_id, data)
-                    elif message_type == 'discovery':
-                        await self._handle_discovery(device_id, data, topic=topic)
-                    else:
-                        await self._update_device_discovery(device_id, 'unknown', data)
+            namespace, device_id, message_type = parts[0], parts[1], parts[2]
+            base_namespace = settings.mqtt_base_topic.split('/')[0]
+
+            if namespace != base_namespace:
+                return
+
+            if message_type == 'data':
+                await self._handle_sensor_data(topic, {**data, 'device_id': device_id})
+            elif message_type == 'status':
+                await self._handle_device_status(device_id, data)
+            elif message_type == 'discovery':
+                await self._handle_discovery(device_id, data, topic=topic)
+            elif message_type == 'relay' and len(parts) >= 4 and parts[3] == 'status':
+                payload = {**data, 'device_id': data.get('device_id') or device_id}
+                await self._handle_relay_status(topic, payload)
+            else:
+                await self._update_device_discovery(device_id, 'unknown', data)
 
         except Exception as e:
             logger.error(f"Error handling dynamic topic {topic}: {e}")
-
     async def _handle_device_status(self, device_id: str, data: Dict[str, Any]):
         """Handle device status messages for heartbeat"""
         await self._update_device_discovery(device_id, 'status', data)
@@ -691,6 +697,25 @@ class MQTTClient:
 
         except Exception as e:
             logger.error(f"Error marking inactive devices: {e}")
+
+    async def publish_relay_control(self, device_id: str, relay_control):
+        """Publish relay control command to ESP32"""
+        if not self.client or not self.is_connected:
+            raise Exception("MQTT client not connected")
+
+        try:
+            topic = f"esp32/{device_id}/control"
+            payload = {
+                "relay": relay_control.relay,
+                "state": relay_control.state
+            }
+
+            self.client.publish(topic, json.dumps(payload), qos=settings.mqtt_qos)
+            logger.info(f"Published relay control command to {topic}: {payload}")
+
+        except Exception as e:
+            logger.error(f"Error publishing relay control: {e}")
+            raise
 
     async def disconnect(self):
         """Disconnect from MQTT broker"""

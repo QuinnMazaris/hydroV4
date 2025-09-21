@@ -112,7 +112,8 @@ export default function Dashboard() {
     const nextState = currentState === 'on' ? 'off' : 'on'
 
     try {
-      const res = await fetch(`/api/actuators/${deviceId}/relay/control`, {
+      const apiBase = process.env.NODE_ENV === 'development' ? 'http://localhost:8000' : ''
+      const res = await fetch(`${apiBase}/api/actuators/${deviceId}/relay/control`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ relay: actuator.number, state: nextState }),
