@@ -112,7 +112,7 @@ export default function Dashboard() {
     const nextState = currentState === 'on' ? 'off' : 'on'
 
     try {
-      const apiBase = process.env.NODE_ENV === 'development' ? 'http://localhost:8000' : ''
+      const apiBase = process.env.NEXT_PUBLIC_API_BASE_URL ?? (process.env.NODE_ENV === 'development' ? 'http://localhost:8000' : '')
       const res = await fetch(`${apiBase}/api/actuators/${deviceId}/relay/control`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },

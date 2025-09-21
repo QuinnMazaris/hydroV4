@@ -33,6 +33,10 @@ class Settings(BaseSettings):
     # Data Retention
     data_retention_days: int = 30
 
+    # History snapshot downsampling (for WS initial load)
+    # Approximate total points per metric over last 24h
+    history_snapshot_target_points: int = 600
+
     # Logging
     log_level: str = "INFO"
 

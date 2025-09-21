@@ -117,10 +117,6 @@ class RelayControl(BaseModel):
     relay: int  # 1-16
     state: str  # "on" or "off"
 
-class RelayStatus(BaseModel):
-    device_id: str
-    relays: Dict[str, str]  # {"relay1": "off", "relay2": "on", ...}
-
 class ActuatorStateCreate(BaseModel):
     device_id: str
     actuator_type: str

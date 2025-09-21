@@ -34,6 +34,8 @@ class MQTTClient:
         self.message_handlers: Dict[str, Callable] = {}
         self.message_queue = queue.Queue()
         self.processing_task = None
+        base_topic = settings.mqtt_base_topic.strip('/')
+        self.base_topic_parts = base_topic.split('/') if base_topic else []
         self._setup_handlers()
 
     def _extract_numeric_metrics(self, data: Dict[str, Any]) -> Dict[str, float]:
@@ -130,14 +132,18 @@ class MQTTClient:
         parts = topic.split('/')
         if not parts:
             return None
-        base = settings.mqtt_base_topic.split('/')[0]
-        if parts[0] != base:
+        base_parts = self.base_topic_parts
+        base_len = len(base_parts)
+        if base_len == 0:
             return None
-        if len(parts) >= 2:
-            candidate = parts[1]
-            if candidate not in {'data', 'status', 'relay', 'discovery'}:
-                return candidate
-        return None
+        if parts[:base_len] != base_parts:
+            return None
+        if len(parts) <= base_len:
+            return None
+        candidate = parts[base_len]
+        if candidate in {'data', 'status', 'relay', 'discovery'}:
+            return None
+        return candidate
 
     def _canonical_device_id(self, device_id: Optional[str]) -> str:
         candidate = device_id or PLACEHOLDER_DEVICE_ID
@@ -504,26 +510,31 @@ class MQTTClient:
         """Handle dynamic device topics for autodiscovery and status updates"""
         try:
             parts = topic.split('/')
-            if len(parts) < 3:
+            base_parts = self.base_topic_parts
+            base_len = len(base_parts)
+
+            if base_len == 0:
+                return
+            if len(parts) <= base_len + 1:
+                return
+            if parts[:base_len] != base_parts:
                 return
 
-            namespace, device_id, message_type = parts[0], parts[1], parts[2]
-            base_namespace = settings.mqtt_base_topic.split('/')[0]
-
-            if namespace != base_namespace:
-                return
+            device_id = parts[base_len]
+            message_type = parts[base_len + 1]
+            canonical_id = self._canonical_device_id(data.get('device_id') or device_id)
 
             if message_type == 'data':
-                await self._handle_sensor_data(topic, {**data, 'device_id': device_id})
+                await self._handle_sensor_data(topic, {**data, 'device_id': canonical_id})
             elif message_type == 'status':
-                await self._handle_device_status(device_id, data)
+                await self._handle_device_status(canonical_id, data)
             elif message_type == 'discovery':
-                await self._handle_discovery(device_id, data, topic=topic)
-            elif message_type == 'relay' and len(parts) >= 4 and parts[3] == 'status':
-                payload = {**data, 'device_id': data.get('device_id') or device_id}
+                await self._handle_discovery(canonical_id, data, topic=topic)
+            elif message_type == 'relay' and len(parts) >= base_len + 3 and parts[base_len + 2] == 'status':
+                payload = {**data, 'device_id': canonical_id}
                 await self._handle_relay_status(topic, payload)
             else:
-                await self._update_device_discovery(device_id, 'unknown', data)
+                await self._update_device_discovery(canonical_id, 'unknown', data)
 
         except Exception as e:
             logger.error(f"Error handling dynamic topic {topic}: {e}")

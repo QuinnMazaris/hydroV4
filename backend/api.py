@@ -18,7 +18,6 @@ from .models import (
     Device,
     DeviceResponse,
     RelayControl,
-    RelayStatus,
     SensorReading,
     SensorReadingResponse,
 )
@@ -105,8 +104,9 @@ async def ws_metrics(websocket: WebSocket):
         snapshot = await build_initial_snapshot()
         await websocket.send_json({
             "type": "snapshot",
-            "devices": snapshot["devices"],
-            "latest": snapshot["latest"],
+            "devices": snapshot.get("devices", {}),
+            "latest": snapshot.get("latest", {}),
+            "history": snapshot.get("history", {}),
             "ts": datetime.utcnow().timestamp()
         })
     except Exception:
@@ -145,9 +145,16 @@ def reading_to_metric_payload(reading: SensorReading) -> Dict[str, Any]:
 
 
 async def build_initial_snapshot():
-    """Build a snapshot of active devices and their latest reading values."""
+    """Build a snapshot of active devices, latest values, and 24h history.
+
+    Returns a dict with:
+      - devices: discovered device metadata
+      - latest: latest DB-backed reading per device
+      - history: last 24 hours of readings per device/metric
+    """
     devices: Dict[str, Any] = {}
     latest: Dict[str, Dict[str, Any]] = {}
+    history: Dict[str, Dict[str, List[Dict[str, Any]]]] = {}
 
     # Use in-memory registry first
     discovered = await mqtt_client.get_device_list()
@@ -190,10 +197,64 @@ async def build_initial_snapshot():
                     "timestamp": int(r.timestamp.timestamp() * 1000),
                     "metrics": reading_to_metric_payload(r),
                 }
+
+            # Also build last 24 hours history for hydration, downsampled
+            since = datetime.utcnow() - timedelta(hours=24)
+
+            # We first fetch the timestamps only to know distinct buckets
+            # Then for each device/metric we compute an evenly spaced sampling
+            # approach: pick approximately N points across the 24h window
+            target_points = max(50, min(3000, settings.history_snapshot_target_points))
+
+            hist_q = (
+                select(SensorReading)
+                .where(SensorReading.timestamp >= since)
+                .order_by(SensorReading.device_id, SensorReading.timestamp)
+            )
+            hist_res = await db.execute(hist_q)
+            hist_rows = hist_res.scalars().all()
+
+            # Organize per device to sample evenly later
+            per_device: Dict[str, List[SensorReading]] = {}
+            for r in hist_rows:
+                per_device.setdefault(r.device_id, []).append(r)
+
+            for device_id, rows in per_device.items():
+                if not rows:
+                    continue
+                n = len(rows)
+                if n <= target_points:
+                    # No need to downsample, just push all metric points
+                    for r in rows:
+                        metrics = reading_to_metric_payload(r)
+                        if not metrics:
+                            continue
+                        ts_ms = int(r.timestamp.timestamp() * 1000)
+                        dev_series = history.setdefault(device_id, {})
+                        for metric_name, value in metrics.items():
+                            series = dev_series.setdefault(metric_name, [])
+                            series.append({"timestamp": ts_ms, "value": value})
+                else:
+                    # Downsample by picking evenly spaced indices
+                    step = n / float(target_points)
+                    indices = [int(i * step) for i in range(target_points)]
+                    # ensure last index included
+                    if indices[-1] != n - 1:
+                        indices[-1] = n - 1
+                    for idx in indices:
+                        r = rows[idx]
+                        metrics = reading_to_metric_payload(r)
+                        if not metrics:
+                            continue
+                        ts_ms = int(r.timestamp.timestamp() * 1000)
+                        dev_series = history.setdefault(device_id, {})
+                        for metric_name, value in metrics.items():
+                            series = dev_series.setdefault(metric_name, [])
+                            series.append({"timestamp": ts_ms, "value": value})
     except Exception:
         pass
 
-    return {"devices": devices, "latest": latest}
+    return {"devices": devices, "latest": latest, "history": history}
 
 # Device endpoints
 @app.get("/api/devices", response_model=List[DeviceResponse])

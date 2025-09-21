@@ -29,7 +29,7 @@ export type DeviceInfo = {
 export type DevicesMap = Record<string, DeviceInfo>
 
 type IncomingEvent =
-  | { type: "snapshot"; devices: DevicesMap; latest: Record<string, DeviceLatest>; ts: number }
+  | { type: "snapshot"; devices: DevicesMap; latest: Record<string, DeviceLatest>; history?: Record<string, Record<string, MetricPoint[]>>; ts: number }
   | { type: "device"; device_id: string; device_type?: string; is_active?: boolean; last_seen?: number; metrics?: Record<string, MetricMeta>; actuators?: Array<Record<string, any>> }
   | { type: "reading"; device_id: string; timestamp: number; metrics: Record<string, number> }
   | { type: "error"; code?: string; message: string; context?: Record<string, unknown>; ts?: number }
@@ -96,12 +96,41 @@ export function useWsMetrics(options?: {
                 return next
               })
               const buffers = buffersRef.current
+
+              // 1) Hydrate history (last 24h) first
+              if (ev.history) {
+                for (const [deviceId, metrics] of Object.entries(ev.history)) {
+                  const series = (buffers[deviceId] ||= {})
+                  for (const [metricName, points] of Object.entries(metrics)) {
+                    const arr = (series[metricName] ||= [])
+                    for (const p of points) {
+                      const last = arr[arr.length - 1]
+                      if (!last || p.timestamp > last.timestamp) {
+                        arr.push({ timestamp: p.timestamp, value: p.value })
+                      } else if (p.timestamp === last.timestamp) {
+                        last.value = p.value
+                      } else {
+                        // out-of-order safeguard: append if not duplicate
+                        if (!arr.some((x) => x.timestamp === p.timestamp)) arr.push({ timestamp: p.timestamp, value: p.value })
+                      }
+                    }
+                    if (arr.length > maxPointsPerSeries) series[metricName] = arr.slice(-maxPointsPerSeries)
+                  }
+                }
+              }
+
+              // 2) Then apply single latest point per device (skip if duplicate timestamp)
               for (const [deviceId, latest] of Object.entries(ev.latest || {})) {
                 const series = (buffers[deviceId] ||= {})
                 const ts = latest.timestamp
                 for (const [metricName, value] of Object.entries(latest.metrics)) {
                   const arr = (series[metricName] ||= [])
-                  arr.push({ timestamp: ts, value })
+                  const last = arr[arr.length - 1]
+                  if (!last || ts > last.timestamp) {
+                    arr.push({ timestamp: ts, value })
+                  } else if (last.timestamp === ts) {
+                    last.value = value
+                  }
                   if (arr.length > maxPointsPerSeries) series[metricName] = arr.slice(-maxPointsPerSeries)
                 }
               }
