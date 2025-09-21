@@ -2,13 +2,11 @@
 
 import type React from "react"
 
-import { useMemo, useState } from "react"
+import { useMemo } from "react"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
-import { Button } from "@/components/ui/button"
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
-import { LineChart, Line, AreaChart, Area, XAxis, YAxis, CartesianGrid, ResponsiveContainer, Tooltip } from "recharts"
-import { Activity, TrendingUp, Users, Zap, Database, Globe, ChevronRight } from "lucide-react"
+import { LineChart, Line, XAxis, YAxis, ResponsiveContainer, Tooltip } from "recharts"
+import { Activity, ChevronRight } from "lucide-react"
 import { useWsMetrics } from "@/hooks/use-ws-metrics"
 
 interface MetricCardProps {
@@ -19,9 +17,10 @@ interface MetricCardProps {
   icon: React.ReactNode
   data: Array<{ time: string; value: number; timestamp: number }>
   color: string
+  yDomain?: [number, number]
 }
 
-function MetricCard({ title, value, change, trend, icon, data, color }: MetricCardProps) {
+function MetricCard({ title, value, change, trend, icon, data, color, yDomain }: MetricCardProps) {
   return (
     <Card className="bg-card/50 backdrop-blur-sm border-border/50 hover:bg-card/70 transition-all duration-200">
       <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
@@ -41,6 +40,21 @@ function MetricCard({ title, value, change, trend, icon, data, color }: MetricCa
         <div className="h-16 w-full">
           <ResponsiveContainer width="100%" height="100%">
             <LineChart data={data}>
+              <YAxis hide domain={yDomain ? yDomain : ["auto", "auto"]} />
+              <XAxis hide dataKey="time" />
+              <Tooltip
+                isAnimationActive={false}
+                cursor={{ stroke: "oklch(0.22 0 0)", strokeWidth: 1 }}
+                contentStyle={{
+                  backgroundColor: "oklch(0.12 0 0)",
+                  border: "1px solid oklch(0.22 0 0)",
+                  borderRadius: "8px",
+                  color: "oklch(0.98 0 0)",
+                  padding: "6px 8px",
+                }}
+                labelFormatter={(label) => label as string}
+                formatter={(v) => [typeof v === "number" ? v.toFixed(2) : String(v), "Value"]}
+              />
               <Line
                 type="monotone"
                 dataKey="value"
@@ -49,6 +63,7 @@ function MetricCard({ title, value, change, trend, icon, data, color }: MetricCa
                 dot={false}
                 strokeLinecap="round"
                 isAnimationActive={false}
+                activeDot={{ r: 3 }}
               />
             </LineChart>
           </ResponsiveContainer>
@@ -59,23 +74,8 @@ function MetricCard({ title, value, change, trend, icon, data, color }: MetricCa
 }
 
 export default function Dashboard() {
-  const [timeRange, setTimeRange] = useState("1h")
-  const { metricsByDevice, devices, status } = useWsMetrics({ url: "ws://localhost:8000/ws/metrics" })
-
-  const timeWindowMs = useMemo(() => {
-    switch (timeRange) {
-      case "1h":
-        return 60 * 60 * 1000
-      case "6h":
-        return 6 * 60 * 60 * 1000
-      case "24h":
-        return 24 * 60 * 60 * 1000
-      case "7d":
-        return 7 * 24 * 60 * 60 * 1000
-      default:
-        return 60 * 60 * 1000
-    }
-  }, [timeRange])
+  const { metricsByDevice, devices, status } = useWsMetrics()
+  const timeWindowMs = 24 * 60 * 60 * 1000
 
   const metricDisplayName = (name: string) =>
     name
@@ -115,6 +115,7 @@ export default function Dashboard() {
       icon: React.ReactNode
       data: Array<{ time: string; value: number; timestamp: number }>
       color: string
+      yDomain?: [number, number]
     }> = []
 
     Object.entries(metricsByDevice).forEach(([deviceId, seriesMap]) => {
@@ -126,6 +127,13 @@ export default function Dashboard() {
           value: p.value,
           time: new Date(p.timestamp).toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" }),
         }))
+        // Compute Y domain with padding for visibility
+        const values = filtered.map((p) => p.value)
+        const minVal = Math.min(...values)
+        const maxVal = Math.max(...values)
+        const span = Math.max(1e-6, maxVal - minVal)
+        const pad = Math.max(span * 0.1, Math.max(0.01 * Math.abs(maxVal), 0.01))
+        const yDomain: [number, number] = [minVal - pad, maxVal + pad]
         const first = filtered[0]?.value ?? 0
         const last = filtered[filtered.length - 1]?.value ?? 0
         const diff = last - first
@@ -139,6 +147,7 @@ export default function Dashboard() {
           icon: <Activity className="w-4 h-4" />,
           data,
           color: metricColor(metricName),
+          yDomain,
         })
       })
     })
@@ -148,9 +157,7 @@ export default function Dashboard() {
     return results
   }, [metricsByDevice, timeWindowMs])
 
-  const mainChartData = useMemo(() => {
-    return cards[0]?.data || []
-  }, [cards])
+  // No primary metric chart; sparklines serve as primary visualization
 
   return (
     <div className="min-h-screen bg-background text-foreground">
@@ -169,22 +176,7 @@ export default function Dashboard() {
                 {status === "live" ? "Live" : status === "connecting" ? "Connecting" : "Disconnected"}
               </Badge>
             </div>
-            <div className="flex items-center space-x-4">
-              <Select value={timeRange} onValueChange={setTimeRange}>
-                <SelectTrigger className="w-32 bg-card/50 border-border/50">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="1h">Last hour</SelectItem>
-                  <SelectItem value="6h">Last 6 hours</SelectItem>
-                  <SelectItem value="24h">Last 24 hours</SelectItem>
-                  <SelectItem value="7d">Last 7 days</SelectItem>
-                </SelectContent>
-              </Select>
-              <Button variant="outline" size="sm" className="bg-card/50 border-border/50">
-                Export
-              </Button>
-            </div>
+            <div />
           </div>
         </div>
       </header>
@@ -202,57 +194,10 @@ export default function Dashboard() {
               icon={c.icon}
               data={c.data}
               color={c.color}
+              yDomain={c.yDomain}
             />
           ))}
         </div>
-
-        {/* Main Chart */}
-        <Card className="bg-card/50 backdrop-blur-sm border-border/50 mb-8">
-          <CardHeader>
-            <div className="flex items-center justify-between">
-              <CardTitle className="text-lg font-semibold text-foreground">Primary Metric</CardTitle>
-              <div className="flex items-center space-x-2 text-sm text-muted-foreground">
-                <div className="flex items-center space-x-1">
-                  <div className="w-2 h-2 rounded-full bg-chart-1"></div>
-                  <span>Live</span>
-                </div>
-              </div>
-            </div>
-          </CardHeader>
-          <CardContent>
-            <div className="h-80 w-full">
-              <ResponsiveContainer width="100%" height="100%">
-                <AreaChart data={mainChartData}>
-                  <defs>
-                    <linearGradient id="requestGradient" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="5%" stopColor="oklch(0.7 0.15 142)" stopOpacity={0.3} />
-                      <stop offset="95%" stopColor="oklch(0.7 0.15 142)" stopOpacity={0} />
-                    </linearGradient>
-                  </defs>
-                  <CartesianGrid strokeDasharray="3 3" stroke="oklch(0.22 0 0)" />
-                  <XAxis dataKey="time" stroke="oklch(0.65 0 0)" fontSize={12} tickLine={false} axisLine={false} interval={"preserveStartEnd"} minTickGap={20} />
-                  <YAxis stroke="oklch(0.65 0 0)" fontSize={12} tickLine={false} axisLine={false} />
-                  <Tooltip
-                    contentStyle={{
-                      backgroundColor: "oklch(0.12 0 0)",
-                      border: "1px solid oklch(0.22 0 0)",
-                      borderRadius: "8px",
-                      color: "oklch(0.98 0 0)",
-                    }}
-                  />
-                  <Area
-                    type="monotone"
-                    dataKey="value"
-                    stroke="oklch(0.7 0.15 142)"
-                    strokeWidth={2}
-                    fill="url(#requestGradient)"
-                    isAnimationActive={false}
-                  />
-                </AreaChart>
-              </ResponsiveContainer>
-            </div>
-          </CardContent>
-        </Card>
 
         {/* Bottom Section */}
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
