@@ -10,7 +10,7 @@ import { LineChart, Line, XAxis, YAxis, ResponsiveContainer } from "recharts"
 import { Activity, ChevronRight } from "lucide-react"
 
 import { describeValue, resolveMetricMeta } from "@/lib/metrics"
-import { useWsMetrics } from "@/hooks/use-ws-metrics"
+import { useWsSensors } from "@/hooks/use-ws-metrics"
 import type { DeviceInfo } from "@/hooks/use-ws-metrics"
 
 interface MetricCardProps {
@@ -65,7 +65,7 @@ function MetricCard({ title, valueLabel, changeLabel, trend, icon, data, color, 
 }
 
 export default function Dashboard() {
-  const { metricsByDevice, devices, status, errors } = useWsMetrics()
+  const { sensorsByDevice, devices, status, errors } = useWsSensors()
   const timeWindowMs = 24 * 60 * 60 * 1000
 
   const formatRelativeTime = (timestamp?: number | null) => {
@@ -91,7 +91,7 @@ export default function Dashboard() {
         const actuators = (info.actuators || []) as ActuatorInfo[]
         return {
           deviceId,
-          deviceType: info.device_type || 'sensor',
+          deviceType: 'device',
           actuators: actuators.filter(Boolean),
         }
       })
@@ -142,7 +142,7 @@ export default function Dashboard() {
       const lastSeen = info.last_seen ?? null
       return {
         deviceId,
-        deviceType: info.device_type || "sensor",
+        deviceType: "device",
         isActive: info.is_active ?? false,
         lastSeen,
         ageMs: lastSeen ? now - lastSeen : Number.POSITIVE_INFINITY,
@@ -168,13 +168,13 @@ export default function Dashboard() {
       yDomain?: [number, number]
     }> = []
 
-    Object.entries(metricsByDevice).forEach(([deviceId, seriesMap]) => {
-      Object.entries(seriesMap).forEach(([metricName, series]) => {
+    Object.entries(sensorsByDevice).forEach(([deviceId, seriesMap]) => {
+      Object.entries(seriesMap).forEach(([sensorName, series]) => {
         const filtered = series.filter((p) => p.timestamp >= start)
         if (filtered.length === 0) return
 
-        const deviceMeta = devices[deviceId]?.metrics?.[metricName]
-        const descriptor = resolveMetricMeta(metricName, deviceMeta)
+        const deviceMeta = devices[deviceId]?.sensors?.[sensorName]
+        const descriptor = resolveMetricMeta(sensorName, deviceMeta)
         const data = filtered.map((p) => ({
           timestamp: p.timestamp,
           value: p.value,
@@ -195,7 +195,7 @@ export default function Dashboard() {
         const changeLabel = `${pct >= 0 ? "+" : ""}${pct.toFixed(1)}%`
 
         results.push({
-          key: `${deviceId}:${metricName}`,
+          key: `${deviceId}:${sensorName}`,
           title: `${deviceId} · ${descriptor.label}`,
           valueLabel,
           changeLabel,
@@ -210,7 +210,7 @@ export default function Dashboard() {
 
     results.sort((a, b) => a.key.localeCompare(b.key))
     return results
-  }, [devices, metricsByDevice, timeWindowMs])
+  }, [devices, sensorsByDevice, timeWindowMs])
 
   // No primary metric chart; sparklines serve as primary visualization
 
@@ -274,7 +274,7 @@ export default function Dashboard() {
                     </Badge>
                   </div>
                   <div className="mt-2 flex items-center justify-between text-xs text-muted-foreground">
-                    <span className="capitalize">{info.device_type || "sensor"}</span>
+                    <span className="capitalize">device</span>
                     <span>{formatRelativeTime(info.last_seen)}</span>
                   </div>
                 </div>

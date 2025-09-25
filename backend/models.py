@@ -1,87 +1,100 @@
-from sqlalchemy import Column, Integer, String, Float, DateTime, Boolean, Text, ForeignKey
+from datetime import datetime
+from typing import Any, Dict, List, Optional, Union
+
+from sqlalchemy import (
+    JSON,
+    Boolean,
+    Column,
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship
-from datetime import datetime
-from typing import Optional, Dict, Any
-from pydantic import BaseModel
-import json
+
+from pydantic import BaseModel, Field
 
 Base = declarative_base()
+
 
 class Device(Base):
     __tablename__ = "devices"
 
     id = Column(Integer, primary_key=True, index=True)
-    device_id = Column(String(100), unique=True, index=True)
-    device_type = Column(String(50))  # "sensor", "actuator"
-    name = Column(String(200))
+    device_key = Column(String(100), unique=True, index=True, nullable=False)
+    name = Column(String(200), nullable=True)
     description = Column(Text, nullable=True)
-    last_seen = Column(DateTime, default=datetime.utcnow)
-    is_active = Column(Boolean, default=True)
+    last_seen = Column(DateTime, default=datetime.utcnow, nullable=False)
+    is_active = Column(Boolean, default=True, nullable=False)
     device_metadata = Column(Text, nullable=True)  # JSON string for device-specific data
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
-    # Relationships
-    sensor_readings = relationship("SensorReading", back_populates="device")
-    actuator_states = relationship("ActuatorState", back_populates="device")
+    metrics = relationship(
+        "Metric",
+        back_populates="device",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
 
-class SensorReading(Base):
-    __tablename__ = "sensor_readings"
 
-    id = Column(Integer, primary_key=True, index=True)
-    device_id = Column(String(100), ForeignKey("devices.device_id"))
-    timestamp = Column(DateTime, default=datetime.utcnow, index=True)
-
-    # Environmental sensors (BME680)
-    temperature = Column(Float, nullable=True)
-    pressure = Column(Float, nullable=True)
-    humidity = Column(Float, nullable=True)
-    gas_kohms = Column(Float, nullable=True)
-
-    # Light sensor
-    lux = Column(Float, nullable=True)
-
-    # Water sensors
-    water_temp_c = Column(Float, nullable=True)
-    tds_ppm = Column(Float, nullable=True)
-    ph = Column(Float, nullable=True)
-
-    # Distance sensor
-    distance_mm = Column(Float, nullable=True)
-
-    # Calculated values
-    vpd_kpa = Column(Float, nullable=True)
-
-    # Raw data for extensibility
-    raw_data = Column(Text, nullable=True)  # JSON string
-
-    # Relationships
-    device = relationship("Device", back_populates="sensor_readings")
-
-class ActuatorState(Base):
-    __tablename__ = "actuator_states"
+class Metric(Base):
+    __tablename__ = "metrics"
 
     id = Column(Integer, primary_key=True, index=True)
-    device_id = Column(String(100), ForeignKey("devices.device_id"))
-    actuator_type = Column(String(50))  # "relay", "pump", "valve", etc.
-    actuator_number = Column(Integer)  # 1-16 for relays
-    state = Column(String(10))  # "on", "off"
-    timestamp = Column(DateTime, default=datetime.utcnow, index=True)
-    command_source = Column(String(50), default="manual")  # "manual", "automation", "schedule"
+    device_id = Column(Integer, ForeignKey("devices.id", ondelete="CASCADE"), nullable=False)
+    metric_key = Column(String(100), nullable=False)
+    display_name = Column(String(200), nullable=True)
+    unit = Column(String(50), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
-    # Relationships
-    device = relationship("Device", back_populates="actuator_states")
+    device = relationship("Device", back_populates="metrics")
+    readings = relationship(
+        "Reading",
+        back_populates="metric",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
 
-# Pydantic models for API
+    __table_args__ = (
+        UniqueConstraint("device_id", "metric_key", name="uq_metric_device_key"),
+        Index("ix_metrics_device_id", "device_id"),
+    )
+
+
+class Reading(Base):
+    __tablename__ = "readings"
+
+    id = Column(Integer, primary_key=True, index=True)
+    metric_id = Column(Integer, ForeignKey("metrics.id", ondelete="CASCADE"), nullable=False)
+    timestamp = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+    value = Column(JSON, nullable=False)
+
+    metric = relationship("Metric", back_populates="readings")
+
+    __table_args__ = (
+        Index("ix_readings_metric_id", "metric_id"),
+        Index("ix_readings_metric_ts", "metric_id", "timestamp"),
+    )
+
+
+JsonPrimitive = Union[str, int, float, bool, None]
+JsonValue = Union[JsonPrimitive, Dict[str, Any], List[Any]]
+
+
 class DeviceBase(BaseModel):
-    device_id: str
-    device_type: str
-    name: str
+    device_key: str = Field(..., description="Unique external identifier for the device")
+    name: Optional[str] = None
     description: Optional[str] = None
     device_metadata: Optional[str] = None
 
+
 class DeviceCreate(DeviceBase):
     pass
+
 
 class DeviceResponse(DeviceBase):
     id: int
@@ -92,41 +105,40 @@ class DeviceResponse(DeviceBase):
     class Config:
         from_attributes = True
 
-class SensorReadingCreate(BaseModel):
-    device_id: str
-    temperature: Optional[float] = None
-    pressure: Optional[float] = None
-    humidity: Optional[float] = None
-    gas_kohms: Optional[float] = None
-    lux: Optional[float] = None
-    water_temp_c: Optional[float] = None
-    tds_ppm: Optional[float] = None
-    ph: Optional[float] = None
-    distance_mm: Optional[float] = None
-    vpd_kpa: Optional[float] = None
-    raw_data: Optional[str] = None
 
-class SensorReadingResponse(SensorReadingCreate):
+class MetricBase(BaseModel):
+    metric_key: str
+    display_name: Optional[str] = None
+    unit: Optional[str] = None
+
+
+class MetricCreate(MetricBase):
+    device_id: int
+
+
+class MetricResponse(MetricBase):
+    id: int
+    device_id: int
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class ReadingCreate(BaseModel):
+    metric_id: int
+    value: JsonValue
+    timestamp: Optional[datetime] = None
+
+
+class ReadingResponse(ReadingCreate):
     id: int
     timestamp: datetime
 
     class Config:
         from_attributes = True
+
 
 class RelayControl(BaseModel):
     relay: int  # 1-16
     state: str  # "on" or "off"
-
-class ActuatorStateCreate(BaseModel):
-    device_id: str
-    actuator_type: str
-    actuator_number: int
-    state: str
-    command_source: str = "manual"
-
-class ActuatorStateResponse(ActuatorStateCreate):
-    id: int
-    timestamp: datetime
-
-    class Config:
-        from_attributes = True

@@ -3,24 +3,16 @@ from contextlib import suppress
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
-from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException
 from fastapi import WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import desc, func, select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .config import settings
 from .database import AsyncSessionLocal, get_db, init_db
 from .events import event_broker
-from .models import (
-    ActuatorState,
-    ActuatorStateResponse,
-    Device,
-    DeviceResponse,
-    RelayControl,
-    SensorReading,
-    SensorReadingResponse,
-)
+from .models import Device, DeviceResponse, Metric, Reading, RelayControl
 from .mqtt_client import mqtt_client
 from .services.persistence import delete_old_readings
 
@@ -90,10 +82,10 @@ async def maintenance_loop():
 
 
 
-# ---------------- WebSocket live metrics ---------------- #
+# ---------------- WebSocket live sensors ---------------- #
 
-@app.websocket("/ws/metrics")
-async def ws_metrics(websocket: WebSocket):
+@app.websocket("/ws/sensors")
+async def ws_sensors(websocket: WebSocket):
     await websocket.accept()
 
     # Subscribe to broker
@@ -130,131 +122,194 @@ async def ws_metrics(websocket: WebSocket):
         event_broker.unsubscribe(queue)
 
 
-SENSOR_FIELD_EXCLUDES = {"id", "device_id", "timestamp", "raw_data"}
+def _ts_to_ms(ts: datetime) -> int:
+    return int(ts.timestamp() * 1000)
 
-def reading_to_metric_payload(reading: SensorReading) -> Dict[str, Any]:
-    metrics: Dict[str, Any] = {}
-    for column in SensorReading.__table__.columns:
-        if column.name in SENSOR_FIELD_EXCLUDES:
-            continue
-        value = getattr(reading, column.name)
-        if value is not None:
-            metrics[column.name] = value
-    return metrics
+
+def _downsample_points(points: List[Dict[str, Any]], target: int) -> List[Dict[str, Any]]:
+    if target <= 0 or len(points) <= target:
+        return points
+    step = len(points) / float(target)
+    indices = [int(i * step) for i in range(target)]
+    if indices[-1] != len(points) - 1:
+        indices[-1] = len(points) - 1
+    return [points[i] for i in indices]
+
+
+async def _latest_metric_rows(
+    db: AsyncSession,
+    device_key: Optional[str] = None,
+    metric_keys: Optional[List[str]] = None,
+):
+    subquery = (
+        select(Reading.metric_id, func.max(Reading.timestamp).label('latest_ts'))
+        .group_by(Reading.metric_id)
+        .subquery()
+    )
+
+    query = (
+        select(
+            Device.device_key,
+            Metric.metric_key,
+            Reading.timestamp,
+            Reading.value,
+        )
+        .join(Metric, Metric.device_id == Device.id)
+        .join(Reading, Reading.metric_id == Metric.id)
+        .join(
+            subquery,
+            (Reading.metric_id == subquery.c.metric_id)
+            & (Reading.timestamp == subquery.c.latest_ts),
+        )
+    )
+
+    if device_key:
+        query = query.where(Device.device_key == device_key)
+    if metric_keys:
+        query = query.where(Metric.metric_key.in_(metric_keys))
+
+    result = await db.execute(query)
+    return result.all()
+
+
+async def _metric_readings(
+    db: AsyncSession,
+    device_key: str,
+    *,
+    metric_key: Optional[str] = None,
+    metric_prefix: Optional[str] = None,
+    since: Optional[datetime] = None,
+    limit: Optional[int] = None,
+) -> List[Dict[str, Any]]:
+    query = (
+        select(
+            Metric.metric_key,
+            Reading.timestamp,
+            Reading.value,
+        )
+        .join(Reading, Reading.metric_id == Metric.id)
+        .join(Device, Device.id == Metric.device_id)
+        .where(Device.device_key == device_key)
+    )
+
+    if metric_key:
+        query = query.where(Metric.metric_key == metric_key)
+    if metric_prefix:
+        query = query.where(Metric.metric_key.like(f"{metric_prefix}%"))
+    if since:
+        query = query.where(Reading.timestamp >= since)
+
+    query = query.order_by(Reading.timestamp.desc())
+    if limit:
+        query = query.limit(limit)
+
+    rows = (await db.execute(query)).all()
+    records = [
+        {
+            'metric_key': row[0],
+            'timestamp': row[1],
+            'value': row[2],
+        }
+        for row in rows
+    ]
+    records.sort(key=lambda item: item['timestamp'])
+    return records
 
 
 
 async def build_initial_snapshot():
-    """Build a snapshot of active devices, latest values, and 24h history.
-
-    Returns a dict with:
-      - devices: discovered device metadata
-      - latest: latest DB-backed reading per device
-      - history: last 24 hours of readings per device/metric
-    """
+    """Build a snapshot of active devices, latest values, and 24h history."""
     devices: Dict[str, Any] = {}
     latest: Dict[str, Dict[str, Any]] = {}
     history: Dict[str, Dict[str, List[Dict[str, Any]]]] = {}
 
-    # Use in-memory registry first
     discovered = await mqtt_client.get_device_list()
-    for device_id, info in discovered.items():
-        devices[device_id] = {
-            "device_type": info.get("device_type", "sensor"),
-            "is_active": info.get("is_active", True),
-            "last_seen": info.get("last_seen"),
-            "metrics": info.get("metrics", {}),
-            "actuators": info.get("actuators", []),
+    for device_key, info in discovered.items():
+        devices[device_key] = {
+            'is_active': info.get('is_active', True),
+            'last_seen': info.get('last_seen'),
+            'sensors': info.get('sensors', {}),
+            'actuators': info.get('actuators', []),
         }
 
-    # Query latest DB values per device
     try:
         async with AsyncSessionLocal() as db:
-            # Subquery to get latest timestamp per device
-            subquery = (
-                select(
-                    SensorReading.device_id,
-                    func.max(SensorReading.timestamp).label('max_timestamp')
-                )
-                .group_by(SensorReading.device_id)
-                .subquery()
+            # Ensure database-known devices are registered in snapshot
+            device_rows = await db.execute(
+                select(Device.device_key, Device.is_active, Device.last_seen)
             )
-
-            query = (
-                select(SensorReading)
-                .join(
-                    subquery,
-                    (SensorReading.device_id == subquery.c.device_id) &
-                    (SensorReading.timestamp == subquery.c.max_timestamp)
-                )
-            )
-
-            result = await db.execute(query)
-            rows = result.scalars().all()
-
-            for r in rows:
-                latest[r.device_id] = {
-                    "timestamp": int(r.timestamp.timestamp() * 1000),
-                    "metrics": reading_to_metric_payload(r),
-                }
-
-            # Also build last 24 hours history for hydration, downsampled
-            since = datetime.utcnow() - timedelta(hours=24)
-
-            # We first fetch the timestamps only to know distinct buckets
-            # Then for each device/metric we compute an evenly spaced sampling
-            # approach: pick approximately N points across the 24h window
-            target_points = max(50, min(3000, settings.history_snapshot_target_points))
-
-            hist_q = (
-                select(SensorReading)
-                .where(SensorReading.timestamp >= since)
-                .order_by(SensorReading.device_id, SensorReading.timestamp)
-            )
-            hist_res = await db.execute(hist_q)
-            hist_rows = hist_res.scalars().all()
-
-            # Organize per device to sample evenly later
-            per_device: Dict[str, List[SensorReading]] = {}
-            for r in hist_rows:
-                per_device.setdefault(r.device_id, []).append(r)
-
-            for device_id, rows in per_device.items():
-                if not rows:
-                    continue
-                n = len(rows)
-                if n <= target_points:
-                    # No need to downsample, just push all metric points
-                    for r in rows:
-                        metrics = reading_to_metric_payload(r)
-                        if not metrics:
-                            continue
-                        ts_ms = int(r.timestamp.timestamp() * 1000)
-                        dev_series = history.setdefault(device_id, {})
-                        for metric_name, value in metrics.items():
-                            series = dev_series.setdefault(metric_name, [])
-                            series.append({"timestamp": ts_ms, "value": value})
+            for device_key, is_active, last_seen in device_rows:
+                if device_key not in devices:
+                    devices[device_key] = {
+                        'is_active': is_active,
+                        'last_seen': _ts_to_ms(last_seen) if isinstance(last_seen, datetime) else None,
+                        'sensors': {},
+                        'actuators': [],
+                    }
                 else:
-                    # Downsample by picking evenly spaced indices
-                    step = n / float(target_points)
-                    indices = [int(i * step) for i in range(target_points)]
-                    # ensure last index included
-                    if indices[-1] != n - 1:
-                        indices[-1] = n - 1
-                    for idx in indices:
-                        r = rows[idx]
-                        metrics = reading_to_metric_payload(r)
-                        if not metrics:
-                            continue
-                        ts_ms = int(r.timestamp.timestamp() * 1000)
-                        dev_series = history.setdefault(device_id, {})
-                        for metric_name, value in metrics.items():
-                            series = dev_series.setdefault(metric_name, [])
-                            series.append({"timestamp": ts_ms, "value": value})
+                    entry = devices[device_key]
+                    entry.setdefault('is_active', is_active)
+                    if entry.get('last_seen') is None and isinstance(last_seen, datetime):
+                        entry['last_seen'] = _ts_to_ms(last_seen)
+
+            latest_rows = await _latest_metric_rows(db)
+            for device_key, metric_key, ts, value in latest_rows:
+                devices.setdefault(device_key, {
+                    'is_active': True,
+                    'last_seen': _ts_to_ms(ts),
+                    'sensors': {},
+                    'actuators': [],
+                })
+                entry = latest.setdefault(
+                    device_key,
+                    {'timestamp': None, 'metrics': {}, 'values': {}},
+                )
+                ts_ms = _ts_to_ms(ts)
+                entry['metrics'][metric_key] = {'timestamp': ts_ms, 'value': value}
+                entry['values'][metric_key] = value
+                if entry['timestamp'] is None or ts_ms > entry['timestamp']:
+                    entry['timestamp'] = ts_ms
+
+            since = datetime.utcnow() - timedelta(hours=24)
+            history_query = (
+                select(
+                    Device.device_key,
+                    Metric.metric_key,
+                    Reading.timestamp,
+                    Reading.value,
+                )
+                .join(Metric, Metric.device_id == Device.id)
+                .join(Reading, Reading.metric_id == Metric.id)
+                .where(Reading.timestamp >= since)
+                .order_by(Device.device_key, Metric.metric_key, Reading.timestamp)
+            )
+            history_rows = (await db.execute(history_query)).all()
+
+            per_series: Dict[tuple[str, str], List[Dict[str, Any]]] = {}
+            for device_key, metric_key, ts, value in history_rows:
+                per_series.setdefault((device_key, metric_key), []).append({
+                    'timestamp': ts,
+                    'value': value,
+                })
+
+            target_points = max(50, min(3000, settings.history_snapshot_target_points))
+            for (device_key, metric_key), points in per_series.items():
+                if not points:
+                    continue
+                points.sort(key=lambda item: item['timestamp'])
+                serialised = [
+                    {'timestamp': _ts_to_ms(item['timestamp']), 'value': item['value']}
+                    for item in points
+                ]
+                trimmed = _downsample_points(serialised, target_points)
+                history.setdefault(device_key, {})[metric_key] = trimmed
     except Exception:
         pass
 
-    return {"devices": devices, "latest": latest, "history": history}
+    return {'devices': devices, 'latest': latest, 'history': history}
+
+
+
 
 # Device endpoints
 @app.get("/api/devices", response_model=List[DeviceResponse])
@@ -275,7 +330,7 @@ async def get_devices(
 async def get_device(device_id: str, db: AsyncSession = Depends(get_db)):
     """Get specific device by ID"""
     result = await db.execute(
-        select(Device).where(Device.device_id == device_id)
+        select(Device).where(Device.device_key == device_id)
     )
     device = result.scalar_one_or_none()
 
@@ -290,218 +345,220 @@ async def get_discovered_devices():
     return await mqtt_client.get_device_list()
 
 # Sensor data endpoints
-@app.get("/api/sensors/{device_id}/readings", response_model=List[SensorReadingResponse])
+
+@app.get("/api/sensors/{device_id}/readings")
 async def get_sensor_readings(
     device_id: str,
-    limit: int = 100,
+    metric: Optional[str] = None,
+    limit: int = 500,
     hours: Optional[int] = 24,
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
 ):
-    """Get sensor readings for a specific device"""
-    query = select(SensorReading).where(SensorReading.device_id == device_id)
+    """Return recent readings grouped by metric for a specific device."""
+    since = datetime.utcnow() - timedelta(hours=hours) if hours else None
+    records = await _metric_readings(
+        db,
+        device_key=device_id,
+        metric_key=metric,
+        since=since,
+        limit=limit,
+    )
 
-    if hours:
-        since = datetime.utcnow() - timedelta(hours=hours)
-        query = query.where(SensorReading.timestamp >= since)
+    grouped: Dict[str, List[Dict[str, Any]]] = {}
+    for record in records:
+        grouped.setdefault(record['metric_key'], []).append({
+            'timestamp': _ts_to_ms(record['timestamp']),
+            'value': record['value'],
+        })
 
-    query = query.order_by(desc(SensorReading.timestamp)).limit(limit)
+    return grouped
 
-    result = await db.execute(query)
-    readings = result.scalars().all()
-    return readings
 
-@app.get("/api/sensors/{device_id}/latest", response_model=SensorReadingResponse)
+@app.get("/api/sensors/{device_id}/latest")
 async def get_latest_sensor_reading(
     device_id: str,
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
 ):
-    """Get latest sensor reading for a device"""
-    result = await db.execute(
-        select(SensorReading)
-        .where(SensorReading.device_id == device_id)
-        .order_by(desc(SensorReading.timestamp))
-        .limit(1)
-    )
-    reading = result.scalar_one_or_none()
-
-    if not reading:
+    """Return the latest reading per metric for a device."""
+    rows = await _latest_metric_rows(db, device_key=device_id)
+    if not rows:
         raise HTTPException(status_code=404, detail="No readings found for device")
 
-    return reading
+    metrics: Dict[str, Dict[str, Any]] = {}
+    values: Dict[str, Any] = {}
+    latest_ts: Optional[int] = None
+
+    for _device_key, metric_key, ts, value in rows:
+        ts_ms = _ts_to_ms(ts)
+        metrics[metric_key] = {'timestamp': ts_ms, 'value': value}
+        values[metric_key] = value
+        if latest_ts is None or ts_ms > latest_ts:
+            latest_ts = ts_ms
+
+    return {
+        'device_id': device_id,
+        'timestamp': latest_ts,
+        'metrics': metrics,
+        'values': values,
+    }
+
 
 @app.get("/api/sensors/summary")
 async def get_sensor_summary(db: AsyncSession = Depends(get_db)):
-    """Get summary of all sensor data"""
-    # Get latest reading for each active device
-    subquery = (
-        select(
-            SensorReading.device_id,
-            func.max(SensorReading.timestamp).label('max_timestamp')
-        )
-        .group_by(SensorReading.device_id)
-        .subquery()
-    )
-
-    query = (
-        select(SensorReading)
-        .join(
-            subquery,
-            (SensorReading.device_id == subquery.c.device_id) &
-            (SensorReading.timestamp == subquery.c.max_timestamp)
-        )
-    )
-
-    result = await db.execute(query)
-    latest_readings = result.scalars().all()
-
-    summary: Dict[str, Any] = {}
-    for reading in latest_readings:
-        summary[reading.device_id] = {
-            "timestamp": reading.timestamp,
-            **reading_to_metric_payload(reading),
+    """Return the latest value for each metric grouped by device."""
+    rows = await _latest_metric_rows(db)
+    summary: Dict[str, Dict[str, Any]] = {}
+    for device_key, metric_key, ts, value in rows:
+        device_entry = summary.setdefault(device_key, {})
+        device_entry[metric_key] = {
+            'timestamp': _ts_to_ms(ts),
+            'value': value,
         }
-
     return summary
 
 # Actuator endpoints
+
 @app.post("/api/actuators/{device_id}/relay/control")
 async def control_relay(
     device_id: str,
     relay_control: RelayControl,
-    background_tasks: BackgroundTasks
+    db: AsyncSession = Depends(get_db),
 ):
-    """Control relay state"""
-    # Validate relay number
+    """Control relay state via MQTT after validating the target metric exists."""
     if not 1 <= relay_control.relay <= 16:
         raise HTTPException(status_code=400, detail="Relay number must be between 1 and 16")
 
-    # Validate state
     if relay_control.state not in ["on", "off"]:
         raise HTTPException(status_code=400, detail="State must be 'on' or 'off'")
 
-    # Send MQTT command
+    metric_key = f"relay{relay_control.relay}"
+    metric_row = await db.execute(
+        select(Metric)
+        .join(Device, Device.id == Metric.device_id)
+        .where((Device.device_key == device_id) & (Metric.metric_key == metric_key))
+    )
+    metric_obj = metric_row.scalar_one_or_none()
+    if not metric_obj:
+        raise HTTPException(status_code=404, detail=f"Relay metric {metric_key} not registered for device")
+
     try:
         await mqtt_client.publish_relay_control(device_id, relay_control)
         return {"message": f"Relay {relay_control.relay} control command sent", "status": "success"}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to send relay command: {str(e)}")
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to send relay command: {exc}")
 
-@app.get("/api/actuators/{device_id}/states", response_model=List[ActuatorStateResponse])
+
+@app.get("/api/actuators/{device_id}/states")
 async def get_actuator_states(
     device_id: str,
-    limit: int = 50,
+    limit: int = 100,
     hours: Optional[int] = 24,
-    db: AsyncSession = Depends(get_db)
+    metric_prefix: str = 'relay',
+    db: AsyncSession = Depends(get_db),
 ):
-    """Get actuator states for a device"""
-    query = select(ActuatorState).where(ActuatorState.device_id == device_id)
+    """Return actuator readings (e.g., relays) grouped by metric."""
+    since = datetime.utcnow() - timedelta(hours=hours) if hours else None
+    records = await _metric_readings(
+        db,
+        device_key=device_id,
+        metric_prefix=metric_prefix,
+        since=since,
+        limit=limit,
+    )
 
-    if hours:
-        since = datetime.utcnow() - timedelta(hours=hours)
-        query = query.where(ActuatorState.timestamp >= since)
+    grouped: Dict[str, List[Dict[str, Any]]] = {}
+    for record in records:
+        grouped.setdefault(record['metric_key'], []).append({
+            'timestamp': _ts_to_ms(record['timestamp']),
+            'value': record['value'],
+        })
 
-    query = query.order_by(desc(ActuatorState.timestamp)).limit(limit)
+    return grouped
 
-    result = await db.execute(query)
-    states = result.scalars().all()
-    return states
 
 @app.get("/api/actuators/{device_id}/relays/status")
 async def get_relay_status(
     device_id: str,
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
 ):
-    """Get current status of all relays for a device"""
-    relay_states: Dict[int, str] = {}
+    """Get the latest relay states for a device."""
+    rows = await _latest_metric_rows(db, device_key=device_id)
+    relays: Dict[str, Dict[str, Any]] = {}
+    latest_ts: Optional[int] = None
 
-    query = (
-        select(ActuatorState)
-        .where(
-            (ActuatorState.device_id == device_id)
-            & (ActuatorState.actuator_type == "relay")
-        )
-        .order_by(ActuatorState.actuator_number, desc(ActuatorState.timestamp))
-    )
+    for _device_key, metric_key, ts, value in rows:
+        if not metric_key.startswith('relay'):
+            continue
+        ts_ms = _ts_to_ms(ts)
+        relays[metric_key] = {'value': value, 'timestamp': ts_ms}
+        if latest_ts is None or ts_ms > latest_ts:
+            latest_ts = ts_ms
 
-    result = await db.execute(query)
-    for state in result.scalars():
-        if state.actuator_number not in relay_states:
-            relay_states[state.actuator_number] = state.state
-
-    relays_payload = {
-        f"relay{relay_num}": relay_states.get(relay_num, "unknown")
-        for relay_num in range(1, 17)
-    }
-
+    values = {key: payload['value'] for key, payload in relays.items()}
     return {
-        "device_id": device_id,
-        "relays": relays_payload,
-        "timestamp": datetime.utcnow(),
+        'device_id': device_id,
+        'timestamp': latest_ts,
+        'relays': values,
+        'metrics': relays,
     }
 
 # Analytics endpoints
+
 @app.get("/api/analytics/trends")
 async def get_sensor_trends(
     device_id: str,
     metric: str,
     hours: int = 24,
     interval_minutes: int = 60,
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
 ):
-    """Get sensor trends for analytics"""
-    # Validate metric
-    valid_metrics = [
-        column.name
-        for column in SensorReading.__table__.columns
-        if column.name not in SENSOR_FIELD_EXCLUDES
-    ]
-    if metric not in valid_metrics:
-        raise HTTPException(status_code=400, detail=f"Invalid metric. Must be one of: {valid_metrics}")
+    """Compute rolling averages for a metric over time."""
+    metric_row = await db.execute(
+        select(Metric)
+        .join(Device, Device.id == Metric.device_id)
+        .where((Device.device_key == device_id) & (Metric.metric_key == metric))
+    )
+    metric_obj = metric_row.scalar_one_or_none()
+    if not metric_obj:
+        raise HTTPException(status_code=404, detail="Metric not found for device")
 
     since = datetime.utcnow() - timedelta(hours=hours)
-
-    # This is a simplified version - in production you might want to use proper time-series aggregation
-    query = (
-        select(SensorReading)
-        .where(
-            (SensorReading.device_id == device_id) &
-            (SensorReading.timestamp >= since)
-        )
-        .order_by(SensorReading.timestamp)
+    readings = await _metric_readings(
+        db,
+        device_key=device_id,
+        metric_key=metric,
+        since=since,
     )
 
-    result = await db.execute(query)
-    readings = result.scalars().all()
-
-    # Group by intervals
-    trends = []
-    current_time = since
     interval_delta = timedelta(minutes=interval_minutes)
+    current_time = since
+    now = datetime.utcnow()
+    pointer = 0
+    trends: List[Dict[str, Any]] = []
 
-    while current_time < datetime.utcnow():
+    while current_time < now:
         interval_end = current_time + interval_delta
-        interval_readings = [
-            r for r in readings
-            if current_time <= r.timestamp < interval_end
-        ]
-
-        if interval_readings:
-            values = [getattr(r, metric) for r in interval_readings if getattr(r, metric) is not None]
-            if values:
-                avg_value = sum(values) / len(values)
-                trends.append({
-                    "timestamp": current_time,
-                    "value": avg_value,
-                    "count": len(values)
-                })
-
+        values: List[float] = []
+        while pointer < len(readings) and readings[pointer]['timestamp'] < interval_end:
+            raw_value = readings[pointer]['value']
+            if isinstance(raw_value, (int, float)):
+                values.append(float(raw_value))
+            elif isinstance(raw_value, bool):
+                values.append(1.0 if raw_value else 0.0)
+            pointer += 1
+        avg_value = sum(values) / len(values) if values else None
+        trends.append({
+            'timestamp': _ts_to_ms(current_time),
+            'average': avg_value,
+            'count': len(values),
+        })
         current_time = interval_end
 
     return {
-        "device_id": device_id,
-        "metric": metric,
-        "interval_minutes": interval_minutes,
-        "trends": trends
+        'device_id': device_id,
+        'metric': metric,
+        'interval_minutes': interval_minutes,
+        'trends': trends,
     }
 
 # Health check

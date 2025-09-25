@@ -19,10 +19,9 @@ export type DataError = {
 }
 
 export type DeviceInfo = {
-  device_type?: string
   is_active?: boolean
   last_seen?: number | null
-  metrics?: Record<string, MetricMeta>
+  sensors?: Record<string, MetricMeta>
   actuators?: Array<Record<string, any>>
 }
 
@@ -30,16 +29,16 @@ export type DevicesMap = Record<string, DeviceInfo>
 
 type IncomingEvent =
   | { type: "snapshot"; devices: DevicesMap; latest: Record<string, DeviceLatest>; history?: Record<string, Record<string, MetricPoint[]>>; ts: number }
-  | { type: "device"; device_id: string; device_type?: string; is_active?: boolean; last_seen?: number; metrics?: Record<string, MetricMeta>; actuators?: Array<Record<string, any>> }
-  | { type: "reading"; device_id: string; timestamp: number; metrics: Record<string, number> }
+  | { type: "device"; device_id: string; is_active?: boolean; last_seen?: number; sensors?: Record<string, MetricMeta>; actuators?: Array<Record<string, any>> }
+  | { type: "reading"; device_id: string; timestamp: number; sensors: Record<string, number> }
   | { type: "error"; code?: string; message: string; context?: Record<string, unknown>; ts?: number }
 
-export function useWsMetrics(options?: {
+export function useWsSensors(options?: {
   url?: string
   maxPointsPerSeries?: number
   fps?: number
 }) {
-  const defaultUrl = typeof window !== "undefined" ? `ws://${window.location.hostname}:8000/ws/metrics` : "ws://localhost:8000/ws/metrics"
+  const defaultUrl = typeof window !== "undefined" ? `ws://${window.location.hostname}:8000/ws/sensors` : "ws://localhost:8000/ws/sensors"
   const { url, maxPointsPerSeries = 2000, fps = 4 } = options || {}
   const resolvedUrl = url || defaultUrl
 
@@ -88,7 +87,7 @@ export function useWsMetrics(options?: {
                   next[deviceId] = {
                     ...current,
                     ...info,
-                    metrics: { ...(current.metrics || {}), ...(info.metrics || {}) },
+                    sensors: { ...(current.sensors || {}), ...(info.sensors || {}) },
                     actuators: info.actuators ?? current.actuators,
                     last_seen: info.last_seen ?? current.last_seen ?? null,
                   }
@@ -142,10 +141,9 @@ export function useWsMetrics(options?: {
                   ...prev,
                   [ev.device_id]: {
                     ...current,
-                    device_type: ev.device_type ?? current.device_type,
                     is_active: ev.is_active ?? current.is_active,
                     last_seen: ev.last_seen ?? current.last_seen ?? null,
-                    metrics: { ...(current.metrics || {}), ...(ev.metrics || {}) },
+                    sensors: { ...(current.sensors || {}), ...(ev.sensors || {}) },
                     actuators: ev.actuators ?? current.actuators,
                   },
                 }
@@ -164,8 +162,8 @@ export function useWsMetrics(options?: {
               const buffers = buffersRef.current
               const series = (buffers[ev.device_id] ||= {})
               const ts = ev.timestamp
-              for (const [metricName, value] of Object.entries(ev.metrics)) {
-                const arr = (series[metricName] ||= [])
+              for (const [sensorName, value] of Object.entries(ev.sensors)) {
+                const arr = (series[sensorName] ||= [])
                 const last = arr[arr.length - 1]
                 // If same timestamp as last point, update in place to avoid shape changes
                 if (last && last.timestamp === ts) {
@@ -173,7 +171,7 @@ export function useWsMetrics(options?: {
                 } else {
                   arr.push({ timestamp: ts, value })
                 }
-                if (arr.length > maxPointsPerSeries) series[metricName] = arr.slice(-maxPointsPerSeries)
+                if (arr.length > maxPointsPerSeries) series[sensorName] = arr.slice(-maxPointsPerSeries)
               }
               scheduleCommit()
             }
@@ -203,7 +201,7 @@ export function useWsMetrics(options?: {
     }
   }, [resolvedUrl, maxPointsPerSeries, fps])
 
-  const api = useMemo(() => ({ metricsByDevice: snapshot, devices, status, errors }), [snapshot, devices, status, errors])
+  const api = useMemo(() => ({ sensorsByDevice: snapshot, devices, status, errors }), [snapshot, devices, status, errors])
   return api
 }
 
