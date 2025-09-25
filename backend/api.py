@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from .config import settings
 from .database import AsyncSessionLocal, get_db, init_db
 from .events import event_broker
+from .metrics import build_metric_meta
 from .models import Device, DeviceResponse, Metric, Reading, RelayControl
 from .mqtt_client import mqtt_client
 from .services.persistence import delete_old_readings
@@ -35,8 +36,6 @@ async def startup_event():
     # Start async processor for queued MQTT messages
     await mqtt_client.start_message_processor()
 
-    mqtt_client.request_discovery_broadcast()
-
     app.state.maintenance_task = asyncio.create_task(maintenance_loop())
 
 
@@ -56,8 +55,6 @@ async def maintenance_loop():
     """Background task handling device heartbeat checks, data retention, and capability refresh."""
     last_cleanup = datetime.utcnow()
     cleanup_interval = timedelta(hours=24)
-    discovery_interval = timedelta(seconds=max(120, settings.sensor_discovery_timeout))
-    last_discovery = datetime.utcnow()
     while True:
         try:
             await mqtt_client.mark_inactive_devices()
@@ -67,10 +64,6 @@ async def maintenance_loop():
                 cutoff = now - timedelta(days=settings.data_retention_days)
                 await delete_old_readings(cutoff)
                 last_cleanup = now
-
-            if (now - last_discovery) >= discovery_interval:
-                mqtt_client.request_discovery_broadcast()
-                last_discovery = now
 
             await asyncio.sleep(settings.sensor_heartbeat_interval)
         except asyncio.CancelledError:
@@ -223,34 +216,49 @@ async def build_initial_snapshot():
     latest: Dict[str, Dict[str, Any]] = {}
     history: Dict[str, Dict[str, List[Dict[str, Any]]]] = {}
 
-    discovered = await mqtt_client.get_device_list()
-    for device_key, info in discovered.items():
-        devices[device_key] = {
-            'is_active': info.get('is_active', True),
-            'last_seen': info.get('last_seen'),
-            'sensors': info.get('sensors', {}),
-            'actuators': info.get('actuators', []),
-        }
-
     try:
         async with AsyncSessionLocal() as db:
-            # Ensure database-known devices are registered in snapshot
             device_rows = await db.execute(
-                select(Device.device_key, Device.is_active, Device.last_seen)
+                select(Device).where(Device.is_active == True)
             )
-            for device_key, is_active, last_seen in device_rows:
-                if device_key not in devices:
-                    devices[device_key] = {
-                        'is_active': is_active,
-                        'last_seen': _ts_to_ms(last_seen) if isinstance(last_seen, datetime) else None,
+            for device in device_rows.scalars().all():
+                devices[device.device_key] = {
+                    'is_active': device.is_active,
+                    'last_seen': _ts_to_ms(device.last_seen) if device.last_seen else None,
+                    'sensors': {},
+                    'actuators': [],
+                }
+
+            metric_rows = await db.execute(
+                select(
+                    Device.device_key,
+                    Metric.metric_key,
+                    Metric.display_name,
+                    Metric.unit,
+                ).join(Metric, Metric.device_id == Device.id)
+            )
+            for device_key, metric_key, display_name, unit in metric_rows:
+                entry = devices.setdefault(
+                    device_key,
+                    {
+                        'is_active': True,
+                        'last_seen': None,
                         'sensors': {},
                         'actuators': [],
-                    }
-                else:
-                    entry = devices[device_key]
-                    entry.setdefault('is_active', is_active)
-                    if entry.get('last_seen') is None and isinstance(last_seen, datetime):
-                        entry['last_seen'] = _ts_to_ms(last_seen)
+                    },
+                )
+                overrides: Dict[str, Any] = {}
+                if display_name:
+                    overrides['label'] = display_name
+                if unit:
+                    overrides['unit'] = unit
+                meta = build_metric_meta(metric_key, overrides if overrides else None)
+                entry['sensors'][metric_key] = {
+                    'id': meta.id,
+                    'label': meta.label,
+                    'unit': meta.unit,
+                    'color': meta.color,
+                }
 
             latest_rows = await _latest_metric_rows(db)
             for device_key, metric_key, ts, value in latest_rows:
@@ -342,7 +350,19 @@ async def get_device(device_id: str, db: AsyncSession = Depends(get_db)):
 @app.get("/api/devices/discovered")
 async def get_discovered_devices():
     """Get devices discovered via MQTT"""
-    return await mqtt_client.get_device_list()
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(
+            select(Device).where(Device.is_active == True)
+        )
+        devices: Dict[str, Any] = {}
+        for device in result.scalars().all():
+            devices[device.device_key] = {
+                'is_active': device.is_active,
+                'last_seen': _ts_to_ms(device.last_seen) if device.last_seen else None,
+                'sensors': {},
+                'actuators': [],
+            }
+        return devices
 
 # Sensor data endpoints
 

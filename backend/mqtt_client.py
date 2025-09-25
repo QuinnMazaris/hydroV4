@@ -1,17 +1,20 @@
 import asyncio
 import json
 import queue
-from copy import deepcopy
 from datetime import datetime, timedelta
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Set
 
 import paho.mqtt.client as mqtt
 from loguru import logger
+from sqlalchemy import select
+
 from .config import settings
+from .database import AsyncSessionLocal
 from .events import event_broker
 from .metrics import build_metric_meta
-from .models import RelayControl
+from .models import Device, RelayControl
 from .services.persistence import (
+    get_metric_map,
     get_metric_by_key,
     insert_reading,
     mark_devices_inactive,
@@ -19,13 +22,10 @@ from .services.persistence import (
     upsert_device,
 )
 
-PLACEHOLDER_DEVICE_ID = 'esp32_main'
-
 class MQTTClient:
     def __init__(self):
         self.client: Optional[mqtt.Client] = None
         self.is_connected = False
-        self.device_registry: Dict[str, Dict[str, Any]] = {}
         self.last_seen: Dict[str, datetime] = {}
         self.message_handlers: Dict[str, Callable] = {}
         self.message_queue = queue.Queue()
@@ -139,55 +139,110 @@ class MQTTClient:
             "esp32/status": self._handle_device_status_msg,
         }
 
-    def _sensor_descriptor(self, sensor_id: str, overrides: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        overrides = overrides or {}
-        meta = build_metric_meta(sensor_id, overrides)
-        return {
-            'id': meta.id,
-            'label': meta.label,
-            'unit': meta.unit,
-            'color': meta.color,
-        }
+    async def _touch_device(
+        self,
+        device_key: str,
+        *,
+        metadata: Optional[Any] = None,
+        name: Optional[str] = None,
+        description: Optional[str] = None,
+        last_seen: Optional[datetime] = None,
+    ) -> Device:
+        """Ensure a device record exists and refresh last_seen metadata."""
+        current_time = last_seen or datetime.utcnow()
+        device = await self._ensure_device_record(
+            device_key,
+            name=name,
+            description=description,
+            metadata=metadata,
+            last_seen=current_time,
+        )
+        self.last_seen[device_key] = current_time
+        return device
 
-    def _normalize_sensor_payload(self, payload: Any) -> Dict[str, Dict[str, Any]]:
-        definitions: Dict[str, Dict[str, Any]] = {}
-        if isinstance(payload, list):
-            for item in payload:
-                if not isinstance(item, dict):
-                    continue
-                sensor_id = item.get('id')
-                if not sensor_id:
-                    continue
-                overrides = {k: item.get(k) for k in ('label', 'unit', 'color') if item.get(k)}
-                definitions[sensor_id] = self._sensor_descriptor(sensor_id, overrides)
-        elif isinstance(payload, dict):
-            for sensor_id, info in payload.items():
-                overrides = {}
-                if isinstance(info, dict):
-                    overrides = {k: info.get(k) for k in ('label', 'unit', 'color') if info.get(k)}
-                definitions[sensor_id] = self._sensor_descriptor(sensor_id, overrides)
-        return definitions
+    async def _build_metric_snapshot(self, device_key: str) -> Dict[str, Dict[str, Any]]:
+        metrics = await get_metric_map(device_key)
+        snapshot: Dict[str, Dict[str, Any]] = {}
+        for metric in metrics.values():
+            overrides: Dict[str, Any] = {}
+            if metric.display_name:
+                overrides['label'] = metric.display_name
+            if metric.unit:
+                overrides['unit'] = metric.unit
+            meta = build_metric_meta(metric.metric_key, overrides)
+            snapshot[metric.metric_key] = {
+                'id': meta.id,
+                'label': meta.label,
+                'unit': meta.unit,
+                'color': meta.color,
+            }
+        return snapshot
 
-    def _normalize_actuator_payload(self, payload: Any) -> List[Dict[str, Any]]:
-        if isinstance(payload, list):
-            return [item for item in payload if isinstance(item, dict)]
-        if isinstance(payload, dict):
-            normalized: List[Dict[str, Any]] = []
-            for key, info in payload.items():
-                if isinstance(info, dict):
-                    normalized.append({'id': key, **info})
-            return normalized
-        return []
-
-    def request_discovery_broadcast(self) -> None:
-        if not self.client:
-            return
+    async def _publish_device_event(self, device: Device) -> None:
         try:
-            payload = json.dumps({'request': 'ping'})
-            self.client.publish(settings.discovery_request_topic, payload, qos=settings.mqtt_qos)
+            sensors = await self._build_metric_snapshot(device.device_key)
+            payload = {
+                'type': 'device',
+                'device_id': device.device_key,
+                'is_active': device.is_active,
+                'last_seen': int(device.last_seen.timestamp() * 1000) if device.last_seen else None,
+                'sensors': sensors,
+                'actuators': [],
+            }
+            await event_broker.publish(payload)
         except Exception as exc:
-            logger.error(f"Failed to request discovery broadcast: {exc}")
+            logger.debug(f"Failed to publish device event for {device.device_key}: {exc}")
 
+    def _collect_metric_definitions(
+        self,
+        sensors_payload: Any = None,
+        actuators_payload: Any = None,
+    ) -> List[Dict[str, Optional[str]]]:
+        definitions: List[Dict[str, Optional[str]]] = []
+        seen: Set[str] = set()
+
+        def add_definition(metric_key: Optional[str], label: Optional[str], unit: Optional[str]) -> None:
+            if not metric_key:
+                return
+            key = str(metric_key).strip()
+            if not key or key in seen:
+                return
+            overrides: Dict[str, Any] = {}
+            if label:
+                overrides['label'] = label
+            if unit:
+                overrides['unit'] = unit
+            meta = build_metric_meta(key, overrides if overrides else None)
+            definitions.append(
+                {
+                    'metric_key': key,
+                    'display_name': meta.label,
+                    'unit': meta.unit,
+                }
+            )
+            seen.add(key)
+
+        if isinstance(sensors_payload, list):
+            for item in sensors_payload:
+                if isinstance(item, dict):
+                    add_definition(item.get('id'), item.get('label'), item.get('unit'))
+        elif isinstance(sensors_payload, dict):
+            for sensor_id, info in sensors_payload.items():
+                label = info.get('label') if isinstance(info, dict) else None
+                unit = info.get('unit') if isinstance(info, dict) else None
+                add_definition(sensor_id, label, unit)
+
+        if isinstance(actuators_payload, list):
+            for entry in actuators_payload:
+                if isinstance(entry, dict):
+                    add_definition(entry.get('id') or entry.get('key'), entry.get('label'), entry.get('unit'))
+        elif isinstance(actuators_payload, dict):
+            for actuator_id, info in actuators_payload.items():
+                label = info.get('label') if isinstance(info, dict) else None
+                unit = info.get('unit') if isinstance(info, dict) else None
+                add_definition(actuator_id, label, unit)
+
+        return definitions
 
     def _device_id_from_topic(self, topic: str) -> Optional[str]:
         parts = topic.split('/')
@@ -206,15 +261,6 @@ class MQTTClient:
             return None
         return candidate
 
-    def _canonical_device_id(self, device_id: Optional[str]) -> str:
-        candidate = device_id or PLACEHOLDER_DEVICE_ID
-        if candidate != PLACEHOLDER_DEVICE_ID:
-            return candidate
-        known_ids = [key for key in self.device_registry.keys() if key != PLACEHOLDER_DEVICE_ID]
-        if len(known_ids) == 1:
-            return known_ids[0]
-        return candidate
-
     async def _publish_error(self, code: str, message: str, context: Optional[Dict[str, Any]] = None) -> None:
         event = {
             'type': 'error',
@@ -227,25 +273,6 @@ class MQTTClient:
             await event_broker.publish(event)
         except Exception:
             logger.error(f"Failed to publish error event {code}: {message}")
-
-    def _absorb_placeholder(self, device_id: str) -> None:
-        if device_id == PLACEHOLDER_DEVICE_ID:
-            return
-        placeholder = self.device_registry.get(PLACEHOLDER_DEVICE_ID)
-        if not placeholder:
-            return
-        entry = self.device_registry.get(device_id)
-        if not entry:
-            return
-        entry['sensors'] = {**placeholder.get('sensors', {}), **entry.get('sensors', {})}
-        if not entry.get('actuators') and placeholder.get('actuators'):
-            entry['actuators'] = placeholder['actuators']
-        if not entry.get('data') and placeholder.get('data'):
-            entry['data'] = placeholder.get('data')
-        if not entry.get('last_seen') and placeholder.get('last_seen'):
-            entry['last_seen'] = placeholder.get('last_seen')
-        self.device_registry.pop(PLACEHOLDER_DEVICE_ID, None)
-        self.last_seen.pop(PLACEHOLDER_DEVICE_ID, None)
 
     async def connect(self):
         """Connect to MQTT broker with reconnection handling"""
@@ -364,12 +391,11 @@ class MQTTClient:
 
 
     async def _handle_sensor_data(self, topic: str, data: Dict[str, Any]):
-        """Handle sensor data messages"""
+        """Handle sensor data messages."""
         try:
             derived_id = data.get('device_id') if isinstance(data, dict) else None
-            derived_id = derived_id or self._device_id_from_topic(topic)
-            device_id = self._canonical_device_id(derived_id)
-            if device_id == PLACEHOLDER_DEVICE_ID:
+            device_id = derived_id or self._device_id_from_topic(topic)
+            if not device_id:
                 logger.warning('Sensor data missing device_id; emitted error and skipped payload', topic=topic)
                 await self._publish_error(
                     'missing_device_id',
@@ -391,25 +417,16 @@ class MQTTClient:
                 )
                 return
 
-            registry_sensors = self.device_registry.get(device_id, {}).get('sensors', {}) or {}
-            sensor_defs: Dict[str, Dict[str, Any]] = {}
-            for sensor_id in sensors.keys():
-                existing_meta = registry_sensors.get(sensor_id) if isinstance(registry_sensors, dict) else None
-                if isinstance(existing_meta, dict):
-                    sensor_defs[sensor_id] = existing_meta
-                else:
-                    sensor_defs[sensor_id] = self._sensor_descriptor(sensor_id)
-
-            await self._update_device_discovery(device_id, metadata=data, sensors=sensor_defs)
-
             timestamp = datetime.utcnow()
+            device = await self._touch_device(device_id, last_seen=timestamp)
+
             for sensor_name, value in sensors.items():
-                meta = sensor_defs.get(sensor_name, {})
+                meta = build_metric_meta(sensor_name)
                 metric_id = await self._ensure_metric_id(
                     device_id,
                     sensor_name,
-                    label=meta.get('label'),
-                    unit=meta.get('unit'),
+                    label=meta.label,
+                    unit=meta.unit,
                 )
                 if metric_id is None:
                     logger.warning(
@@ -435,18 +452,18 @@ class MQTTClient:
                 'sensors': sensors,
             })
 
+            await self._publish_device_event(device)
             logger.debug(f"Processed sensor data for device {device_id}")
 
         except Exception as exc:
             logger.error(f"Error handling sensor data: {exc}")
 
     async def _handle_relay_status(self, topic: str, data: Dict[str, Any]):
-        """Handle relay status messages"""
+        """Handle relay status messages."""
         try:
             derived_id = data.get('device_id') if isinstance(data, dict) else None
-            derived_id = derived_id or self._device_id_from_topic(topic)
-            device_id = self._canonical_device_id(derived_id)
-            if device_id == PLACEHOLDER_DEVICE_ID:
+            device_id = derived_id or self._device_id_from_topic(topic)
+            if not device_id:
                 logger.warning('Relay status missing device_id; emitted error and skipped payload', topic=topic)
                 await self._publish_error(
                     'missing_device_id',
@@ -459,45 +476,40 @@ class MQTTClient:
                 )
                 return
 
-            actuator_defs: List[Dict[str, Any]] = []
-            relay_values: Dict[str, Any] = {}
-            existing = {
-                (entry.get('id') or f"relay{entry.get('number')}"): entry
-                for entry in self.device_registry.get(device_id, {}).get('actuators', []) or []
-            }
-
             items = data.items() if isinstance(data, dict) else []
+            relay_values: Dict[str, Any] = {}
             for key, value in items:
                 if not isinstance(key, str) or key == 'device_id' or not key.startswith('relay'):
                     continue
-                try:
-                    relay_num = int(key.replace('relay', ''))
-                except ValueError:
-                    relay_num = None
-                prior = existing.get(key) or existing.get(f'relay{relay_num}') if relay_num is not None else existing.get(key)
-                actuator_defs.append({
-                    'id': key,
-                    'type': 'relay',
-                    'number': relay_num,
-                    'label': (prior or {}).get('label') or (f"Relay {relay_num}" if relay_num is not None else key),
-                    'state': value,
-                    'unit': '',
-                })
                 relay_values[key] = value
 
-            if not actuator_defs:
+            if not relay_values:
                 return
 
-            await self._update_device_discovery(device_id, metadata=data, actuators=actuator_defs)
-
             timestamp = datetime.utcnow()
+            device = await self._touch_device(device_id, last_seen=timestamp)
+            metric_map = await get_metric_map(device_id)
+
             for relay_key, value in relay_values.items():
-                meta = next((item for item in actuator_defs if item.get('id') == relay_key), {})
+                relay_num: Optional[int] = None
+                if relay_key.startswith('relay'):
+                    try:
+                        relay_num = int(relay_key.replace('relay', ''))
+                    except ValueError:
+                        relay_num = None
+
+                metric = metric_map.get(relay_key)
+                label = metric.display_name if metric and metric.display_name else None
+                unit = metric.unit if metric and metric.unit else ''
+                if not label and relay_num is not None:
+                    label = f"Relay {relay_num}"
+                label = label or relay_key
+
                 metric_id = await self._ensure_metric_id(
                     device_id,
                     relay_key,
-                    label=meta.get('label'),
-                    unit=meta.get('unit'),
+                    label=label,
+                    unit=unit,
                 )
                 if metric_id is None:
                     logger.warning(
@@ -523,6 +535,7 @@ class MQTTClient:
                 'sensors': relay_values,
             })
 
+            await self._publish_device_event(device)
             logger.debug(f"Processed relay status for device {device_id}")
 
         except Exception as exc:
@@ -532,9 +545,8 @@ class MQTTClient:
         """Handle legacy critical relay updates."""
         try:
             derived_id = data.get('device_id') if isinstance(data, dict) else None
-            derived_id = derived_id or self._device_id_from_topic(topic)
-            device_id = self._canonical_device_id(derived_id)
-            if device_id in {PLACEHOLDER_DEVICE_ID, 'critical_relays'}:
+            device_id = derived_id or self._device_id_from_topic(topic)
+            if not device_id or device_id == 'critical_relays':
                 logger.warning('Critical relay update missing device identity; emitted error and skipped payload', topic=topic)
                 await self._publish_error(
                     'missing_device_id',
@@ -547,94 +559,83 @@ class MQTTClient:
                 )
                 return
 
-            relay_defs: List[Dict[str, Any]] = []
-            relay_values: Dict[str, Any] = {}
-
             relay_key = data.get('relay', '') if isinstance(data, dict) else ''
-            if isinstance(relay_key, str) and relay_key.startswith('relay'):
-                try:
-                    relay_num = int(relay_key.replace('relay', ''))
-                except ValueError:
-                    relay_num = None
-                existing = {
-                    (entry.get('id') or f"relay{entry.get('number')}"): entry
-                    for entry in self.device_registry.get(device_id, {}).get('actuators', []) or []
-                }
-                prior = existing.get(relay_key) or existing.get(f'relay{relay_num}') if relay_num is not None else existing.get(relay_key)
-
-                raw_state = data.get('state')
-                if isinstance(raw_state, bool):
-                    state_value = raw_state
-                    state_label = 'on' if raw_state else 'off'
-                else:
-                    state_label = str(raw_state).lower() if raw_state is not None else 'unknown'
-                    if isinstance(raw_state, str):
-                        lowered = raw_state.strip().lower()
-                        if lowered in {'on', 'off'}:
-                            state_value = lowered == 'on'
-                        else:
-                            state_value = state_label
-                    else:
-                        state_value = state_label
-
-                relay_defs.append({
-                    'id': relay_key,
-                    'type': 'relay',
-                    'number': relay_num,
-                    'label': (prior or {}).get('label') or (f"Relay {relay_num}" if relay_num is not None else relay_key),
-                    'state': state_label,
-                    'unit': '',
-                })
-                relay_values[relay_key] = state_value
-
-            if not relay_defs:
+            if not isinstance(relay_key, str) or not relay_key.startswith('relay'):
                 return
 
-            await self._update_device_discovery(device_id, metadata=data, actuators=relay_defs)
+            try:
+                relay_num = int(relay_key.replace('relay', ''))
+            except ValueError:
+                relay_num = None
+
+            raw_state = data.get('state') if isinstance(data, dict) else None
+            if isinstance(raw_state, bool):
+                state_value = raw_state
+                state_label = 'on' if raw_state else 'off'
+            else:
+                state_label = str(raw_state).lower() if raw_state is not None else 'unknown'
+                if isinstance(raw_state, str):
+                    lowered = raw_state.strip().lower()
+                    if lowered in {'on', 'off'}:
+                        state_value = lowered == 'on'
+                    else:
+                        state_value = state_label
+                else:
+                    state_value = state_label
 
             timestamp = datetime.utcnow()
-            for relay_key, value in relay_values.items():
-                meta = next((item for item in relay_defs if item.get('id') == relay_key), {})
-                metric_id = await self._ensure_metric_id(
-                    device_id,
-                    relay_key,
-                    label=meta.get('label'),
-                    unit=meta.get('unit'),
+            device = await self._touch_device(device_id, last_seen=timestamp)
+            metric_map = await get_metric_map(device_id)
+
+            metric = metric_map.get(relay_key)
+            label = metric.display_name if metric and metric.display_name else None
+            unit = metric.unit if metric and metric.unit else ''
+            if not label and relay_num is not None:
+                label = f"Relay {relay_num}"
+            label = label or relay_key
+
+            metric_id = await self._ensure_metric_id(
+                device_id,
+                relay_key,
+                label=label,
+                unit=unit,
+            )
+            if metric_id is None:
+                logger.warning(
+                    'No metric registered for critical relay state; skipping reading',
+                    device_id=device_id,
+                    relay=relay_key,
                 )
-                if metric_id is None:
-                    logger.warning(
-                        'No metric registered for critical relay state; skipping reading',
-                        device_id=device_id,
-                        relay=relay_key,
-                    )
-                    continue
-                try:
-                    await insert_reading(metric_id, value, timestamp=timestamp)
-                except Exception as exc:
-                    logger.error(f"Failed to persist critical relay state for {device_id}/{relay_key}: {exc}")
-                    await self._publish_error(
-                        'relay_persist_failed',
-                        'Failed to persist critical relay state; continuing with live stream.',
-                        {'device_id': device_id, 'topic': topic, 'metric_key': relay_key},
-                    )
+                return
+
+            try:
+                await insert_reading(metric_id, state_value, timestamp=timestamp)
+            except Exception as exc:
+                logger.error(f"Failed to persist critical relay state for {device_id}/{relay_key}: {exc}")
+                await self._publish_error(
+                    'relay_persist_failed',
+                    'Failed to persist critical relay state; continuing with live stream.',
+                    {'device_id': device_id, 'topic': topic, 'metric_key': relay_key},
+                )
 
             await event_broker.publish({
                 'type': 'reading',
                 'device_id': device_id,
                 'timestamp': int(timestamp.timestamp() * 1000),
-                'sensors': relay_values,
+                'sensors': {relay_key: state_value},
             })
+
+            await self._publish_device_event(device)
 
         except Exception as exc:
             logger.error(f"Error handling critical relay update: {exc}")
 
     async def _handle_device_status_msg(self, topic: str, data: Dict[str, Any]):
-        """Handle device status messages"""
+        """Handle device status messages."""
         try:
             derived_id = data.get('device_id') if isinstance(data, dict) else None
-            derived_id = derived_id or self._device_id_from_topic(topic)
-            device_id = self._canonical_device_id(derived_id)
-            if device_id == PLACEHOLDER_DEVICE_ID:
+            device_id = derived_id or self._device_id_from_topic(topic)
+            if not device_id:
                 logger.warning('Status update missing device_id; emitted error and skipped payload', topic=topic)
                 await self._publish_error(
                     'missing_device_id',
@@ -647,13 +648,15 @@ class MQTTClient:
                 )
                 return
 
-            await self._update_device_discovery(device_id, metadata={'status': data})
+            metadata = {'status': data} if data is not None else None
+            device = await self._touch_device(device_id, metadata=metadata)
+            await self._publish_device_event(device)
 
         except Exception as exc:
             logger.error(f"Error handling device status: {exc}")
 
     async def _handle_dynamic_topic(self, topic: str, data: Dict[str, Any]):
-        """Handle dynamic device topics for autodiscovery and status updates"""
+        """Handle dynamic device topics for autodiscovery and status updates."""
         try:
             parts = topic.split('/')
             base_parts = self.base_topic_parts
@@ -664,7 +667,7 @@ class MQTTClient:
 
             device_id = parts[base_len]
             message_type = parts[base_len + 1]
-            canonical_id = self._canonical_device_id(data.get('device_id') or device_id)
+            canonical_id = (data.get('device_id') if isinstance(data, dict) else None) or device_id
 
             if message_type == 'data':
                 payload = {**data, 'device_id': canonical_id} if isinstance(data, dict) else {'device_id': canonical_id}
@@ -675,30 +678,27 @@ class MQTTClient:
             elif message_type == 'discovery':
                 await self._handle_discovery(canonical_id, data, topic=topic)
             elif message_type == 'heartbeat':
-                await self._handle_heartbeat(canonical_id, data)
+                if canonical_id:
+                    await self._handle_heartbeat(canonical_id, data if isinstance(data, dict) else {})
             elif message_type == 'relay' and len(parts) >= base_len + 3 and parts[base_len + 2] == 'status':
                 payload = {**data, 'device_id': canonical_id} if isinstance(data, dict) else {'device_id': canonical_id}
                 await self._handle_relay_status(topic, payload)
             else:
-                await self._update_device_discovery(canonical_id, metadata=data)
+                if canonical_id:
+                    metadata = data if isinstance(data, dict) else None
+                    device = await self._touch_device(canonical_id, metadata=metadata)
+                    await self._publish_device_event(device)
 
         except Exception as exc:
             logger.error(f"Error handling dynamic topic {topic}: {exc}")
 
     async def _handle_heartbeat(self, device_id: str, data: Dict[str, Any]):
-        """Handle lightweight heartbeat responses from discovery ping"""
+        """Handle lightweight heartbeat responses from discovery ping."""
         try:
             current_time = datetime.utcnow()
-            self.last_seen[device_id] = current_time
-            await self._ensure_device_record(device_id, metadata=None, last_seen=current_time)
-
-            entry = self.device_registry.get(device_id)
-            if entry:
-                entry['last_seen'] = current_time
-                entry['is_active'] = True
-                logger.debug(f"Heartbeat received from known device {device_id}")
-            else:
-                logger.info(f"Heartbeat from unknown device {device_id} - waiting for boot discovery")
+            device = await self._touch_device(device_id, last_seen=current_time)
+            logger.debug(f"Heartbeat received from device {device_id}")
+            await self._publish_device_event(device)
 
         except Exception as exc:
             logger.error(f"Error handling heartbeat from {device_id}: {exc}")
@@ -707,174 +707,69 @@ class MQTTClient:
         """Handle capability discovery payloads from devices."""
         try:
             derived_id = device_id or (data.get('device_id') if isinstance(data, dict) else None) or (self._device_id_from_topic(topic) if topic else None)
-            canonical_id = self._canonical_device_id(derived_id)
-            if canonical_id == PLACEHOLDER_DEVICE_ID:
+            canonical_id = derived_id
+            if not canonical_id:
                 logger.warning('Discovery payload missing device_id; emitted error and skipped payload', topic=topic)
                 await self._publish_error(
                     'missing_device_id',
                     'Discovery payload missing device_id; payload ignored.',
-                    {'topic': topic, 'payload_keys': list(data.keys()) if isinstance(data, dict) else [], 'device_id': derived_id},
+                    {
+                        'topic': topic,
+                        'payload_keys': list(data.keys()) if isinstance(data, dict) else [],
+                        'device_id': derived_id,
+                    },
                 )
                 return
 
-            sensors = self._normalize_sensor_payload(data.get('sensors', {}))
-            actuators = self._normalize_actuator_payload(data.get('actuators', []))
-            await self._update_device_discovery(
-                canonical_id,
-                metadata=data,
-                sensors=sensors,
-                actuators=actuators,
+            metadata = data if isinstance(data, dict) else None
+            name = None
+            description = None
+            if metadata:
+                name = metadata.get('name') or metadata.get('device_name')
+                description = metadata.get('description')
+            definitions = self._collect_metric_definitions(
+                metadata.get('sensors') if metadata else None,
+                metadata.get('actuators') if metadata else None,
             )
+
+            device = await self._touch_device(
+                canonical_id,
+                metadata=metadata,
+                name=name,
+                description=description,
+            )
+
+            if definitions:
+                await self._sync_metric_definitions(canonical_id, definitions)
+
+            await self._publish_device_event(device)
+
         except Exception as exc:
             logger.error(f"Error handling discovery payload for {device_id}: {exc}")
 
-    async def _update_device_discovery(
-        self,
-        device_id: str,
-        metadata: Optional[Dict[str, Any]] = None,
-        *,
-        sensors: Optional[Dict[str, Dict[str, Any]]] = None,
-        actuators: Optional[Any] = None,
-    ) -> None:
-        """Update device discovery registry and database with optional capability metadata."""
-        try:
-            current_time = datetime.utcnow()
-            self.last_seen[device_id] = current_time
-
-            name = None
-            description = None
-            if isinstance(metadata, dict):
-                name = metadata.get('name') or metadata.get('device_name')
-                description = metadata.get('description')
-
-            await self._ensure_device_record(
-                device_id,
-                name=name,
-                description=description,
-                metadata=metadata,
-                last_seen=current_time,
-            )
-
-            metric_defs: List[Dict[str, Optional[str]]] = []
-            seen_keys = set()
-            if sensors:
-                for key, meta in sensors.items():
-                    metric_key = str(key)
-                    if not metric_key or metric_key in seen_keys:
-                        continue
-                    seen_keys.add(metric_key)
-                    display_name = meta.get('label') if isinstance(meta, dict) else None
-                    unit = meta.get('unit') if isinstance(meta, dict) else None
-                    metric_defs.append(
-                        {
-                            'metric_key': metric_key,
-                            'display_name': display_name or metric_key,
-                            'unit': unit or None,
-                        }
-                    )
-            if isinstance(actuators, list):
-                for entry in actuators:
-                    if not isinstance(entry, dict):
-                        continue
-                    metric_key = str(entry.get('id') or entry.get('key') or '')
-                    if not metric_key or metric_key in seen_keys:
-                        continue
-                    seen_keys.add(metric_key)
-                    display_name = entry.get('label') or metric_key
-                    unit = entry.get('unit') or None
-                    metric_defs.append(
-                        {
-                            'metric_key': metric_key,
-                            'display_name': display_name,
-                            'unit': unit,
-                        }
-                    )
-
-            if metric_defs:
-                await self._sync_metric_definitions(device_id, metric_defs)
-
-            entry = self.device_registry.get(device_id)
-            if not entry:
-                entry = {
-                    'last_seen': current_time,
-                    'is_active': True,
-                    'data': metadata,
-                    'sensors': {},
-                    'actuators': [],
-                }
-                self.device_registry[device_id] = entry
-                logger.info(f"Discovered new device: {device_id}")
-            else:
-                entry['last_seen'] = current_time
-                entry['is_active'] = True
-                if metadata is not None:
-                    entry['data'] = metadata
-                entry.setdefault('sensors', {})
-                entry.setdefault('actuators', [])
-
-            if sensors:
-                sensor_store = entry.setdefault('sensors', {})
-                for sensor_id, meta in sensors.items():
-                    sensor_store[sensor_id] = meta
-            if isinstance(actuators, list):
-                entry['actuators'] = actuators
-
-            self._absorb_placeholder(device_id)
-
-            payload = {
-                'type': 'device',
-                'device_id': device_id,
-                'is_active': entry.get('is_active', True),
-                'last_seen': int(entry['last_seen'].timestamp() * 1000) if isinstance(entry.get('last_seen'), datetime) else None,
-                'sensors': entry.get('sensors', {}),
-                'actuators': entry.get('actuators', []),
-            }
-
-            try:
-                await event_broker.publish(payload)
-            except Exception:
-                pass
-
-        except Exception as exc:
-            logger.error(f"Error updating device discovery for {device_id}: {exc}")
-
-    async def get_device_list(self) -> Dict[str, Dict[str, Any]]:
-        """Get list of discovered devices with JSON-serialisable fields"""
-        snapshot: Dict[str, Dict[str, Any]] = {}
-        for device_id, info in self.device_registry.items():
-            last_seen = info.get('last_seen')
-            snapshot[device_id] = {
-                'is_active': info.get('is_active', True),
-                'last_seen': int(last_seen.timestamp() * 1000) if isinstance(last_seen, datetime) else None,
-                'sensors': deepcopy(info.get('sensors', {})),
-                'actuators': deepcopy(info.get('actuators', [])),
-            }
-        return snapshot
-
     async def mark_inactive_devices(self):
-        """Mark devices as inactive if not seen for a while"""
+        """Mark devices as inactive if not seen for a while."""
         try:
             cutoff_time = datetime.utcnow() - timedelta(seconds=settings.sensor_discovery_timeout)
 
             await mark_devices_inactive(cutoff_time)
 
-            inactive_devices = []
-            for device_id, info in self.device_registry.items():
-                last_seen = info.get('last_seen')
-                if isinstance(last_seen, datetime) and last_seen < cutoff_time:
-                    inactive_devices.append(device_id)
+            async with AsyncSessionLocal() as session:
+                result = await session.execute(
+                    select(Device).where(Device.last_seen < cutoff_time)
+                )
+                inactive = result.scalars().all()
 
-            for device_id in inactive_devices:
-                entry = self.device_registry[device_id]
-                entry['is_active'] = False
+            for device in inactive:
                 try:
+                    sensors = await self._build_metric_snapshot(device.device_key)
                     await event_broker.publish({
                         'type': 'device',
-                        'device_id': device_id,
-                        'is_active': False,
-                        'last_seen': int(entry['last_seen'].timestamp() * 1000) if isinstance(entry.get('last_seen'), datetime) else None,
-                        'sensors': entry.get('sensors', {}),
-                        'actuators': entry.get('actuators', []),
+                        'device_id': device.device_key,
+                        'is_active': device.is_active,
+                        'last_seen': int(device.last_seen.timestamp() * 1000) if device.last_seen else None,
+                        'sensors': sensors,
+                        'actuators': [],
                     })
                 except Exception:
                     pass
