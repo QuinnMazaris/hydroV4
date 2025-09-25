@@ -22,15 +22,15 @@ export type DeviceInfo = {
   is_active?: boolean
   last_seen?: number | null
   sensors?: Record<string, MetricMeta>
-  actuators?: Array<Record<string, any>>
+  actuators?: Record<string, MetricMeta>
 }
 
 export type DevicesMap = Record<string, DeviceInfo>
 
 type IncomingEvent =
   | { type: "snapshot"; devices: DevicesMap; latest: Record<string, DeviceLatest>; history?: Record<string, Record<string, MetricPoint[]>>; ts: number }
-  | { type: "device"; device_id: string; is_active?: boolean; last_seen?: number; sensors?: Record<string, MetricMeta>; actuators?: Array<Record<string, any>> }
-  | { type: "reading"; device_id: string; timestamp: number; sensors: Record<string, number> }
+  | { type: "device"; device_id: string; is_active?: boolean; last_seen?: number; sensors?: Record<string, MetricMeta>; actuators?: Record<string, MetricMeta> }
+  | { type: "reading"; device_id: string; timestamp: number; sensors?: Record<string, number>; actuators?: Record<string, any> }
   | { type: "error"; code?: string; message: string; context?: Record<string, unknown>; ts?: number }
 
 export function useWsSensors(options?: {
@@ -144,7 +144,7 @@ export function useWsSensors(options?: {
                     is_active: ev.is_active ?? current.is_active,
                     last_seen: ev.last_seen ?? current.last_seen ?? null,
                     sensors: { ...(current.sensors || {}), ...(ev.sensors || {}) },
-                    actuators: ev.actuators ?? current.actuators,
+                    actuators: { ...(current.actuators || {}), ...(ev.actuators || {}) },
                   },
                 }
               })
@@ -162,17 +162,37 @@ export function useWsSensors(options?: {
               const buffers = buffersRef.current
               const series = (buffers[ev.device_id] ||= {})
               const ts = ev.timestamp
-              for (const [sensorName, value] of Object.entries(ev.sensors)) {
-                const arr = (series[sensorName] ||= [])
-                const last = arr[arr.length - 1]
-                // If same timestamp as last point, update in place to avoid shape changes
-                if (last && last.timestamp === ts) {
-                  last.value = value
-                } else {
-                  arr.push({ timestamp: ts, value })
+
+              // Process sensor readings
+              if (ev.sensors) {
+                for (const [sensorName, value] of Object.entries(ev.sensors)) {
+                  const arr = (series[sensorName] ||= [])
+                  const last = arr[arr.length - 1]
+                  // If same timestamp as last point, update in place to avoid shape changes
+                  if (last && last.timestamp === ts) {
+                    last.value = value
+                  } else {
+                    arr.push({ timestamp: ts, value })
+                  }
+                  if (arr.length > maxPointsPerSeries) series[sensorName] = arr.slice(-maxPointsPerSeries)
                 }
-                if (arr.length > maxPointsPerSeries) series[sensorName] = arr.slice(-maxPointsPerSeries)
               }
+
+              // Process actuator readings
+              if (ev.actuators) {
+                for (const [actuatorName, value] of Object.entries(ev.actuators)) {
+                  const arr = (series[actuatorName] ||= [])
+                  const last = arr[arr.length - 1]
+                  // If same timestamp as last point, update in place to avoid shape changes
+                  if (last && last.timestamp === ts) {
+                    last.value = value
+                  } else {
+                    arr.push({ timestamp: ts, value })
+                  }
+                  if (arr.length > maxPointsPerSeries) series[actuatorName] = arr.slice(-maxPointsPerSeries)
+                }
+              }
+
               scheduleCommit()
             }
           } catch {}

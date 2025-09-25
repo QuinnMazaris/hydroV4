@@ -49,6 +49,7 @@ class Metric(Base):
     metric_key = Column(String(100), nullable=False)
     display_name = Column(String(200), nullable=True)
     unit = Column(String(50), nullable=True)
+    metric_type = Column(String(20), nullable=False)  # 'sensor' or 'actuator'
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
     device = relationship("Device", back_populates="metrics")
@@ -142,3 +143,8 @@ class ReadingResponse(ReadingCreate):
 class RelayControl(BaseModel):
     relay: int  # 1-16
     state: str  # "on" or "off"
+
+
+class ActuatorControl(BaseModel):
+    actuator_key: str  # The metric key (e.g. "relay1", "pump", "valve_a")
+    state: str  # "on", "off", or other actuator-specific states

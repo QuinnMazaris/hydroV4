@@ -81,56 +81,86 @@ export default function Dashboard() {
   }
 
 
-  type ActuatorInfo = NonNullable<DeviceInfo['actuators']>[number]
+  type ActuatorInfo = {
+    key: string
+    label: string
+    unit: string
+    color: string
+    currentState?: any
+  }
 
   const [actuatorBusy, setActuatorBusy] = useState<Record<string, boolean>>({})
 
   const actuatorDevices = useMemo(() => {
     return Object.entries(devices)
       .map(([deviceId, info]) => {
-        const actuators = (info.actuators || []) as ActuatorInfo[]
+        const actuatorEntries = info.actuators || {}
+        const actuators: ActuatorInfo[] = Object.entries(actuatorEntries).map(([key, meta]) => {
+          // Get current state from sensorsByDevice (live data)
+          const currentState = sensorsByDevice[deviceId]?.[key]?.[sensorsByDevice[deviceId][key].length - 1]?.value
+          return {
+            key,
+            label: meta.label || key,
+            unit: meta.unit || '',
+            color: meta.color || '#888888',
+            currentState
+          }
+        })
         return {
           deviceId,
           deviceType: 'device',
-          actuators: actuators.filter(Boolean),
+          actuators,
         }
       })
       .filter((entry) => entry.actuators.length > 0)
       .sort((a, b) => a.deviceId.localeCompare(b.deviceId))
-  }, [devices])
+  }, [devices, sensorsByDevice])
 
   const recentErrors = useMemo(() => errors.slice(-5).reverse(), [errors])
 
   const handleActuatorToggle = async (deviceId: string, actuator: ActuatorInfo) => {
-    if (!actuator || actuator.type !== 'relay' || typeof actuator.number !== 'number') {
-      console.warn('Unsupported actuator command', deviceId, actuator)
+    if (!actuator || !actuator.key) {
+      console.warn('Invalid actuator', deviceId, actuator)
       return
     }
-    const key = `${deviceId}:${actuator.number}`
-    setActuatorBusy((prev) => ({ ...prev, [key]: true }))
-    const currentState = typeof actuator.state === 'string' ? actuator.state.toLowerCase() : 'unknown'
-    const nextState = currentState === 'on' ? 'off' : 'on'
+
+    const busyKey = `${deviceId}:${actuator.key}`
+    setActuatorBusy((prev) => ({ ...prev, [busyKey]: true }))
+
+    // Determine next state based on current state
+    const currentState = actuator.currentState
+    let nextState: string
+    if (typeof currentState === 'boolean') {
+      nextState = currentState ? 'off' : 'on'
+    } else if (typeof currentState === 'string') {
+      nextState = currentState.toLowerCase() === 'on' ? 'off' : 'on'
+    } else {
+      nextState = 'on' // Default to turning on if unknown state
+    }
 
     try {
       const apiBase = process.env.NEXT_PUBLIC_API_BASE_URL ?? (process.env.NODE_ENV === 'development' ? 'http://localhost:8000' : '')
-      const res = await fetch(`${apiBase}/api/actuators/${deviceId}/relay/control`, {
+      const res = await fetch(`${apiBase}/api/actuators/${deviceId}/control`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ relay: actuator.number, state: nextState }),
+        body: JSON.stringify({
+          actuator_key: actuator.key,
+          state: nextState
+        }),
       })
       if (!res.ok) {
         const message = await res.text()
-        throw new Error(message || 'Failed to send relay command')
+        throw new Error(message || 'Failed to send actuator command')
       }
     } catch (error) {
-      console.error('Failed to send relay command', error)
+      console.error('Failed to send actuator command', error)
       if (typeof window !== 'undefined') {
-        window.alert?.('Failed to send relay command.')
+        window.alert?.('Failed to send actuator command.')
       }
     } finally {
       setActuatorBusy((prev) => {
         const next = { ...prev }
-        delete next[key]
+        delete next[busyKey]
         return next
       })
     }
@@ -188,9 +218,13 @@ export default function Dashboard() {
         const yDomain: [number, number] = [minVal - pad, maxVal + pad]
         const first = filtered[0]?.value ?? 0
         const last = filtered[filtered.length - 1]?.value ?? 0
-        const diff = last - first
-        const pct = first !== 0 ? (diff / first) * 100 : 0
-        const rounded = Number.isInteger(last) ? last : parseFloat(last.toFixed(2))
+        const numericFirst = Number(first)
+        const numericLast = Number(last)
+        const diff = numericLast - numericFirst
+        const pct = Number.isFinite(diff) && Number.isFinite(numericFirst) && numericFirst !== 0 ? (diff / numericFirst) * 100 : 0
+        const rounded = Number.isFinite(numericLast)
+          ? (Number.isInteger(numericLast) ? numericLast : parseFloat(numericLast.toFixed(2)))
+          : 0
         const valueLabel = describeValue(rounded, descriptor.unit)
         const changeLabel = `${pct >= 0 ? "+" : ""}${pct.toFixed(1)}%`
 
@@ -356,17 +390,25 @@ export default function Dashboard() {
                         <span className="text-xs text-muted-foreground">{deviceType}</span>
                       </div>
                       <div className="space-y-2">
-                        {actuators.map((actuator, index) => {
-                          const busyKey = typeof actuator.number === 'number' ? `${deviceId}:${actuator.number}` : `${deviceId}:${index}`
+                        {actuators.map((actuator) => {
+                          const busyKey = `${deviceId}:${actuator.key}`
                           const busy = actuatorBusy[busyKey] ?? false
-                          const stateLabel = typeof actuator.state === 'string' ? actuator.state : 'unknown'
-                          const stateNormalized = stateLabel.toLowerCase()
-                          const isOn = stateNormalized === 'on'
-                          const label = actuator.label
-                            || (actuator.type === 'relay' && typeof actuator.number === 'number'
-                              ? `Relay ${actuator.number}`
-                              : actuator.id || 'Actuator')
-                          const disabled = actuator.type !== 'relay' || typeof actuator.number !== 'number'
+
+                          // Determine current state from WebSocket data
+                          let stateLabel: string
+                          let isOn: boolean
+                          if (typeof actuator.currentState === 'boolean') {
+                            isOn = actuator.currentState
+                            stateLabel = isOn ? 'on' : 'off'
+                          } else if (typeof actuator.currentState === 'string') {
+                            stateLabel = actuator.currentState.toLowerCase()
+                            isOn = stateLabel === 'on'
+                          } else {
+                            stateLabel = 'unknown'
+                            isOn = false
+                          }
+
+                          const label = actuator.label || actuator.key
 
                           return (
                             <div key={busyKey} className="flex items-center justify-between gap-3 rounded-md bg-card/30 px-3 py-2">
@@ -376,8 +418,8 @@ export default function Dashboard() {
                               </div>
                               <Button
                                 size="sm"
-                                variant={isOn ? 'destructive' : 'secondary'}
-                                disabled={busy || disabled}
+                                variant={isOn ? 'destructive' : 'default'}
+                                disabled={busy}
                                 onClick={() => handleActuatorToggle(deviceId, actuator)}
                               >
                                 {busy ? 'Sending...' : isOn ? 'Turn Off' : 'Turn On'}

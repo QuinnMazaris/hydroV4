@@ -13,7 +13,7 @@ from .config import settings
 from .database import AsyncSessionLocal, get_db, init_db
 from .events import event_broker
 from .metrics import build_metric_meta
-from .models import Device, DeviceResponse, Metric, Reading, RelayControl
+from .models import ActuatorControl, Device, DeviceResponse, Metric, Reading, RelayControl
 from .mqtt_client import mqtt_client
 from .services.persistence import delete_old_readings
 
@@ -33,6 +33,8 @@ async def startup_event():
     """Initialize database and MQTT client on startup"""
     await init_db()
     await mqtt_client.connect()
+    # Populate cache from database before starting message processor
+    await mqtt_client.populate_cache_from_db()
     # Start async processor for queued MQTT messages
     await mqtt_client.start_message_processor()
 
@@ -226,7 +228,7 @@ async def build_initial_snapshot():
                     'is_active': device.is_active,
                     'last_seen': _ts_to_ms(device.last_seen) if device.last_seen else None,
                     'sensors': {},
-                    'actuators': [],
+                    'actuators': {},
                 }
 
             metric_rows = await db.execute(
@@ -235,16 +237,17 @@ async def build_initial_snapshot():
                     Metric.metric_key,
                     Metric.display_name,
                     Metric.unit,
+                    Metric.metric_type,
                 ).join(Metric, Metric.device_id == Device.id)
             )
-            for device_key, metric_key, display_name, unit in metric_rows:
+            for device_key, metric_key, display_name, unit, metric_type in metric_rows:
                 entry = devices.setdefault(
                     device_key,
                     {
                         'is_active': True,
                         'last_seen': None,
                         'sensors': {},
-                        'actuators': [],
+                        'actuators': {},
                     },
                 )
                 overrides: Dict[str, Any] = {}
@@ -253,30 +256,38 @@ async def build_initial_snapshot():
                 if unit:
                     overrides['unit'] = unit
                 meta = build_metric_meta(metric_key, overrides if overrides else None)
-                entry['sensors'][metric_key] = {
+
+                metric_info = {
                     'id': meta.id,
                     'label': meta.label,
                     'unit': meta.unit,
                     'color': meta.color,
                 }
 
-            latest_rows = await _latest_metric_rows(db)
-            for device_key, metric_key, ts, value in latest_rows:
+                if metric_type == 'sensor':
+                    entry['sensors'][metric_key] = metric_info
+                elif metric_type == 'actuator':
+                    entry['actuators'][metric_key] = metric_info
+
+            # Get current values from cache instead of database
+            cached_values = mqtt_client.get_cached_values()
+            current_time_ms = int(datetime.utcnow().timestamp() * 1000)
+
+            for device_key, metric_values in cached_values.items():
                 devices.setdefault(device_key, {
                     'is_active': True,
-                    'last_seen': _ts_to_ms(ts),
+                    'last_seen': current_time_ms,
                     'sensors': {},
-                    'actuators': [],
+                    'actuators': {},
                 })
-                entry = latest.setdefault(
-                    device_key,
-                    {'timestamp': None, 'metrics': {}, 'values': {}},
-                )
-                ts_ms = _ts_to_ms(ts)
-                entry['metrics'][metric_key] = {'timestamp': ts_ms, 'value': value}
-                entry['values'][metric_key] = value
-                if entry['timestamp'] is None or ts_ms > entry['timestamp']:
-                    entry['timestamp'] = ts_ms
+                if metric_values:
+                    entry = latest.setdefault(
+                        device_key,
+                        {'timestamp': current_time_ms, 'metrics': {}, 'values': {}},
+                    )
+                    for metric_key, value in metric_values.items():
+                        entry['metrics'][metric_key] = {'timestamp': current_time_ms, 'value': value}
+                        entry['values'][metric_key] = value
 
             since = datetime.utcnow() - timedelta(hours=24)
             history_query = (
@@ -325,7 +336,7 @@ async def get_devices(
     active_only: bool = True,
     db: AsyncSession = Depends(get_db)
 ):
-    """Get list of all devices"""
+    """Get all devices from the system - includes both active and inactive devices for administration purposes"""
     query = select(Device)
     if active_only:
         query = query.where(Device.is_active == True)
@@ -336,7 +347,7 @@ async def get_devices(
 
 @app.get("/api/devices/{device_id}", response_model=DeviceResponse)
 async def get_device(device_id: str, db: AsyncSession = Depends(get_db)):
-    """Get specific device by ID"""
+    """Get a single device by its device_key - used for device configuration and detailed information"""
     result = await db.execute(
         select(Device).where(Device.device_key == device_id)
     )
@@ -347,96 +358,289 @@ async def get_device(device_id: str, db: AsyncSession = Depends(get_db)):
 
     return device
 
-@app.get("/api/devices/discovered")
-async def get_discovered_devices():
-    """Get devices discovered via MQTT"""
-    async with AsyncSessionLocal() as db:
-        result = await db.execute(
-            select(Device).where(Device.is_active == True)
-        )
-        devices: Dict[str, Any] = {}
-        for device in result.scalars().all():
-            devices[device.device_key] = {
-                'is_active': device.is_active,
-                'last_seen': _ts_to_ms(device.last_seen) if device.last_seen else None,
-                'sensors': {},
-                'actuators': [],
-            }
-        return devices
 
-# Sensor data endpoints
+# LLM Analytics endpoint for intelligent system analysis
 
-@app.get("/api/sensors/{device_id}/readings")
-async def get_sensor_readings(
+@app.get("/api/analytics/llm-insights/{device_id}")
+async def get_llm_insights(
     device_id: str,
-    metric: Optional[str] = None,
-    limit: int = 500,
-    hours: Optional[int] = 24,
+    metrics: Optional[str] = None,  # Comma-separated metric names
+    timerange: str = "24h",  # "1h", "24h", "7d", "30d", or "2024-01-01T00:00:00Z/2024-01-02T00:00:00Z"
+    aggregation: str = "hourly",  # "raw", "hourly", "daily"
+    include_stats: bool = True,
+    include_anomalies: bool = True,
+    include_correlations: bool = True,
     db: AsyncSession = Depends(get_db),
 ):
-    """Return recent readings grouped by metric for a specific device."""
-    since = datetime.utcnow() - timedelta(hours=hours) if hours else None
-    records = await _metric_readings(
-        db,
-        device_key=device_id,
-        metric_key=metric,
-        since=since,
-        limit=limit,
+    """Comprehensive analytics endpoint optimized for LLM analysis of hydroponic system data.
+
+    Provides statistical summaries, trend analysis, anomaly detection, and actionable insights
+    for AI-powered decision making about hydroponic tower management.
+    """
+    # Parse timerange
+    if timerange.endswith('h'):
+        hours = int(timerange[:-1])
+        since = datetime.utcnow() - timedelta(hours=hours)
+        period_desc = f"Last {timerange}"
+    elif timerange.endswith('d'):
+        days = int(timerange[:-1])
+        since = datetime.utcnow() - timedelta(days=days)
+        period_desc = f"Last {timerange}"
+    else:
+        # Custom ISO range - for future implementation
+        since = datetime.utcnow() - timedelta(hours=24)
+        period_desc = "Last 24 hours"
+
+    # Parse requested metrics
+    metric_list = metrics.split(',') if metrics else None
+
+    # Get device info
+    device_result = await db.execute(
+        select(Device).where(Device.device_key == device_id)
     )
+    device = device_result.scalar_one_or_none()
+    if not device:
+        raise HTTPException(status_code=404, detail="Device not found")
 
-    grouped: Dict[str, List[Dict[str, Any]]] = {}
-    for record in records:
-        grouped.setdefault(record['metric_key'], []).append({
-            'timestamp': _ts_to_ms(record['timestamp']),
-            'value': record['value'],
-        })
+    # Get all metrics for this device
+    metrics_query = (
+        select(Metric)
+        .where(Metric.device_id == device.id)
+    )
+    if metric_list:
+        metrics_query = metrics_query.where(Metric.metric_key.in_(metric_list))
 
-    return grouped
+    device_metrics = (await db.execute(metrics_query)).scalars().all()
 
+    if not device_metrics:
+        raise HTTPException(status_code=404, detail="No metrics found for device")
 
-@app.get("/api/sensors/{device_id}/latest")
-async def get_latest_sensor_reading(
-    device_id: str,
-    db: AsyncSession = Depends(get_db),
-):
-    """Return the latest reading per metric for a device."""
-    rows = await _latest_metric_rows(db, device_key=device_id)
-    if not rows:
-        raise HTTPException(status_code=404, detail="No readings found for device")
-
-    metrics: Dict[str, Dict[str, Any]] = {}
-    values: Dict[str, Any] = {}
-    latest_ts: Optional[int] = None
-
-    for _device_key, metric_key, ts, value in rows:
-        ts_ms = _ts_to_ms(ts)
-        metrics[metric_key] = {'timestamp': ts_ms, 'value': value}
-        values[metric_key] = value
-        if latest_ts is None or ts_ms > latest_ts:
-            latest_ts = ts_ms
-
-    return {
-        'device_id': device_id,
-        'timestamp': latest_ts,
-        'metrics': metrics,
-        'values': values,
+    # Optimal ranges for common hydroponic metrics
+    OPTIMAL_RANGES = {
+        'temperature': [20, 26],
+        'humidity': [60, 70],
+        'ph': [5.5, 6.5],
+        'tds_ppm': [800, 1200],
+        'water_temp_c': [18, 22],
+        'vpd_kpa': [0.8, 1.2]
     }
 
-
-@app.get("/api/sensors/summary")
-async def get_sensor_summary(db: AsyncSession = Depends(get_db)):
-    """Return the latest value for each metric grouped by device."""
-    rows = await _latest_metric_rows(db)
-    summary: Dict[str, Dict[str, Any]] = {}
-    for device_key, metric_key, ts, value in rows:
-        device_entry = summary.setdefault(device_key, {})
-        device_entry[metric_key] = {
-            'timestamp': _ts_to_ms(ts),
-            'value': value,
+    result = {
+        'device': {
+            'id': device.device_key,
+            'name': device.name or f"Device {device.device_key}",
+            'analysis_period': period_desc,
+            'last_seen': _ts_to_ms(device.last_seen) if device.last_seen else None
+        },
+        'metrics': {},
+        'system_insights': {
+            'overall_status': 'analyzing',
+            'attention_needed': [],
+            'correlations': [],
+            'recommendations': []
         }
-    return summary
+    }
 
-# Actuator endpoints
+    import statistics
+
+    for metric in device_metrics:
+        # Get recent readings for this metric
+        readings_query = (
+            select(Reading.timestamp, Reading.value)
+            .where(
+                (Reading.metric_id == metric.id) &
+                (Reading.timestamp >= since)
+            )
+            .order_by(Reading.timestamp.desc())
+            .limit(1000)  # Reasonable limit for analysis
+        )
+
+        readings_result = await db.execute(readings_query)
+        readings = [(ts, val) for ts, val in readings_result.all()]
+
+        if not readings:
+            continue
+
+        # Extract numeric values for analysis
+        numeric_values = []
+        for _, value in readings:
+            if isinstance(value, (int, float)):
+                numeric_values.append(float(value))
+            elif isinstance(value, bool):
+                numeric_values.append(1.0 if value else 0.0)
+
+        if not numeric_values:
+            continue
+
+        current_value = numeric_values[0]  # Most recent
+        optimal_range = OPTIMAL_RANGES.get(metric.metric_key)
+
+        # Calculate statistics
+        metric_stats = {
+            'mean': round(statistics.mean(numeric_values), 2),
+            'std': round(statistics.stdev(numeric_values) if len(numeric_values) > 1 else 0, 2),
+            'min': round(min(numeric_values), 2),
+            'max': round(max(numeric_values), 2),
+        }
+
+        # Determine status
+        status = 'unknown'
+        if optimal_range:
+            if optimal_range[0] <= current_value <= optimal_range[1]:
+                status = 'optimal'
+            elif current_value < optimal_range[0] * 0.8 or current_value > optimal_range[1] * 1.2:
+                status = 'critical'
+            else:
+                status = 'warning'
+
+        # Trend analysis (simple)
+        trend = 'stable'
+        if len(numeric_values) >= 10:
+            recent_avg = statistics.mean(numeric_values[:5])
+            older_avg = statistics.mean(numeric_values[-5:])
+            change_pct = (recent_avg - older_avg) / older_avg * 100
+            if abs(change_pct) > 10:
+                trend = 'increasing' if change_pct > 0 else 'decreasing'
+
+        # Anomaly detection
+        anomalies = []
+        if include_anomalies and optimal_range:
+            for ts, value in readings[:20]:  # Check recent 20 readings
+                if isinstance(value, (int, float)):
+                    val = float(value)
+                    if val < optimal_range[0] or val > optimal_range[1]:
+                        severity = 'critical' if (val < optimal_range[0] * 0.8 or val > optimal_range[1] * 1.2) else 'warning'
+                        anomalies.append({
+                            'timestamp': ts.isoformat(),
+                            'value': val,
+                            'severity': severity,
+                            'reason': f"Outside optimal range [{optimal_range[0]}-{optimal_range[1]}]"
+                        })
+
+        result['metrics'][metric.metric_key] = {
+            'display_name': metric.display_name or metric.metric_key,
+            'unit': metric.unit or '',
+            'optimal_range': optimal_range,
+            'current': {
+                'value': current_value,
+                'status': status,
+                'last_updated': readings[0][0].isoformat()
+            },
+            'statistics': {
+                **metric_stats,
+                'trend': trend,
+                'data_points': len(readings)
+            },
+            'anomalies': anomalies[:5] if include_anomalies else []
+        }
+
+        # Add to attention list if needed
+        if status in ['warning', 'critical']:
+            result['system_insights']['attention_needed'].append(
+                f"{metric.display_name or metric.metric_key}: {status} ({current_value} {metric.unit or ''})"
+            )
+
+    # Overall system status
+    statuses = [m['current']['status'] for m in result['metrics'].values()]
+    if 'critical' in statuses:
+        result['system_insights']['overall_status'] = 'critical'
+    elif 'warning' in statuses:
+        result['system_insights']['overall_status'] = 'warning'
+    elif 'optimal' in statuses:
+        result['system_insights']['overall_status'] = 'healthy'
+
+    # Simple recommendations
+    recommendations = []
+    for metric_key, data in result['metrics'].items():
+        if data['current']['status'] == 'critical':
+            recommendations.append({
+                'priority': 'high',
+                'action': f"Immediate attention needed for {data['display_name']} - value is {data['current']['value']} {data['unit']}",
+                'metric': metric_key
+            })
+        elif data['current']['status'] == 'warning':
+            recommendations.append({
+                'priority': 'medium',
+                'action': f"Monitor {data['display_name']} - trending outside optimal range",
+                'metric': metric_key
+            })
+
+    result['system_insights']['recommendations'] = recommendations
+
+    return result
+
+
+
+@app.get("/api/devices/{device_id}/capabilities")
+async def get_device_capabilities(
+    device_id: str,
+    db: AsyncSession = Depends(get_db)
+):
+    """Get complete device metadata - all sensors and actuators with their definitions.
+
+    This endpoint provides the frontend with the structure of available metrics,
+    separated by their actual type as stored in the database from discovery data.
+    """
+    # Get device info
+    device_result = await db.execute(
+        select(Device).where(Device.device_key == device_id)
+    )
+    device = device_result.scalar_one_or_none()
+    if not device:
+        raise HTTPException(status_code=404, detail="Device not found")
+
+    # Get all metrics for this device
+    metrics_result = await db.execute(
+        select(Metric).where(Metric.device_id == device.id)
+    )
+    metrics = metrics_result.scalars().all()
+
+    # Separate sensors from actuators using database metric_type
+    sensors = {}
+    actuators = {}
+
+    for metric in metrics:
+        overrides = {}
+        if metric.display_name:
+            overrides['label'] = metric.display_name
+        if metric.unit:
+            overrides['unit'] = metric.unit
+
+        meta = build_metric_meta(metric.metric_key, overrides if overrides else None)
+
+        metric_info = {
+            'display_name': meta.label,
+            'unit': meta.unit,
+            'color': meta.color,
+            'created_at': metric.created_at.isoformat()
+        }
+
+        if metric.metric_type == 'sensor':
+            sensors[metric.metric_key] = metric_info
+        elif metric.metric_type == 'actuator':
+            actuators[metric.metric_key] = metric_info
+        else:
+            # This should never happen if our validation is working
+            raise ValueError(f"Invalid metric_type '{metric.metric_type}' for metric '{metric.metric_key}'")
+
+    return {
+        'device': {
+            'id': device.device_key,
+            'name': device.name or f"Device {device.device_key}",
+            'description': device.description,
+            'last_seen': _ts_to_ms(device.last_seen) if device.last_seen else None,
+            'is_active': device.is_active
+        },
+        'sensors': sensors,
+        'actuators': actuators,
+        'summary': {
+            'sensor_count': len(sensors),
+            'actuator_count': len(actuators),
+            'total_metrics': len(metrics)
+        }
+    }
+
+# Device control endpoint
 
 @app.post("/api/actuators/{device_id}/relay/control")
 async def control_relay(
@@ -468,59 +672,42 @@ async def control_relay(
         raise HTTPException(status_code=500, detail=f"Failed to send relay command: {exc}")
 
 
-@app.get("/api/actuators/{device_id}/states")
-async def get_actuator_states(
+@app.post("/api/actuators/{device_id}/control")
+async def control_actuator(
     device_id: str,
-    limit: int = 100,
-    hours: Optional[int] = 24,
-    metric_prefix: str = 'relay',
+    actuator_control: ActuatorControl,
     db: AsyncSession = Depends(get_db),
 ):
-    """Return actuator readings (e.g., relays) grouped by metric."""
-    since = datetime.utcnow() - timedelta(hours=hours) if hours else None
-    records = await _metric_readings(
-        db,
-        device_key=device_id,
-        metric_prefix=metric_prefix,
-        since=since,
-        limit=limit,
+    """Control any actuator via MQTT after validating it exists as an actuator in the database."""
+    if actuator_control.state not in ["on", "off"]:
+        raise HTTPException(status_code=400, detail="State must be 'on' or 'off'")
+
+    # Validate that the actuator exists and is of type 'actuator'
+    metric_row = await db.execute(
+        select(Metric)
+        .join(Device, Device.id == Metric.device_id)
+        .where(
+            (Device.device_key == device_id)
+            & (Metric.metric_key == actuator_control.actuator_key)
+            & (Metric.metric_type == 'actuator')
+        )
     )
+    metric_obj = metric_row.scalar_one_or_none()
+    if not metric_obj:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Actuator '{actuator_control.actuator_key}' not found for device '{device_id}'"
+        )
 
-    grouped: Dict[str, List[Dict[str, Any]]] = {}
-    for record in records:
-        grouped.setdefault(record['metric_key'], []).append({
-            'timestamp': _ts_to_ms(record['timestamp']),
-            'value': record['value'],
-        })
+    try:
+        await mqtt_client.publish_actuator_control(device_id, actuator_control)
+        return {
+            "message": f"Actuator '{actuator_control.actuator_key}' control command sent",
+            "status": "success"
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to send actuator command: {exc}")
 
-    return grouped
-
-
-@app.get("/api/actuators/{device_id}/relays/status")
-async def get_relay_status(
-    device_id: str,
-    db: AsyncSession = Depends(get_db),
-):
-    """Get the latest relay states for a device."""
-    rows = await _latest_metric_rows(db, device_key=device_id)
-    relays: Dict[str, Dict[str, Any]] = {}
-    latest_ts: Optional[int] = None
-
-    for _device_key, metric_key, ts, value in rows:
-        if not metric_key.startswith('relay'):
-            continue
-        ts_ms = _ts_to_ms(ts)
-        relays[metric_key] = {'value': value, 'timestamp': ts_ms}
-        if latest_ts is None or ts_ms > latest_ts:
-            latest_ts = ts_ms
-
-    values = {key: payload['value'] for key, payload in relays.items()}
-    return {
-        'device_id': device_id,
-        'timestamp': latest_ts,
-        'relays': values,
-        'metrics': relays,
-    }
 
 # Analytics endpoints
 

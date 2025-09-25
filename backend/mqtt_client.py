@@ -12,7 +12,7 @@ from .config import settings
 from .database import AsyncSessionLocal
 from .events import event_broker
 from .metrics import build_metric_meta
-from .models import Device, RelayControl
+from .models import ActuatorControl, Device, Metric, Reading, RelayControl
 from .services.persistence import (
     get_metric_map,
     get_metric_by_key,
@@ -35,6 +35,10 @@ class MQTTClient:
         self._setup_handlers()
         self.device_db_ids: Dict[str, int] = {}
         self.metric_cache: Dict[str, Dict[str, int]] = {}
+        # In-memory cache for latest values: device_key -> metric_key -> latest_value
+        self.values_cache: Dict[str, Dict[str, Any]] = {}
+        # Track which devices have completed discovery
+        self.discovery_completed: Set[str] = set()
 
     async def _ensure_device_record(
         self,
@@ -108,6 +112,57 @@ class MQTTClient:
         metrics = await self._sync_metric_definitions(device_key, definitions)
         return metrics.get(metric_key)
 
+    async def populate_cache_from_db(self):
+        """Bootstrap the in-memory values cache from database latest readings."""
+        try:
+            async with AsyncSessionLocal() as db:
+                latest_rows = await self._latest_metric_rows_for_cache(db)
+                for device_key, metric_key, value in latest_rows:
+                    device_cache = self.values_cache.setdefault(device_key, {})
+                    device_cache[metric_key] = value
+                logger.info(f"Populated cache with {len(latest_rows)} latest metric values")
+        except Exception as exc:
+            logger.error(f"Failed to populate cache from database: {exc}")
+
+    async def _latest_metric_rows_for_cache(self, db):
+        """Get latest reading for each metric across all devices."""
+        from sqlalchemy import func, select
+        subquery = (
+            select(Reading.metric_id, func.max(Reading.timestamp).label('latest_ts'))
+            .group_by(Reading.metric_id)
+            .subquery()
+        )
+
+        query = (
+            select(
+                Device.device_key,
+                Metric.metric_key,
+                Reading.value,
+            )
+            .join(Metric, Metric.device_id == Device.id)
+            .join(Reading, Reading.metric_id == Metric.id)
+            .join(
+                subquery,
+                (Reading.metric_id == subquery.c.metric_id)
+                & (Reading.timestamp == subquery.c.latest_ts),
+            )
+        )
+
+        result = await db.execute(query)
+        return result.all()
+
+    def _update_cache_value(self, device_key: str, metric_key: str, value: Any):
+        """Update a single value in the cache."""
+        device_cache = self.values_cache.setdefault(device_key, {})
+        device_cache[metric_key] = value
+
+    def get_cached_values(self) -> Dict[str, Dict[str, Any]]:
+        """Get a copy of the current values cache."""
+        return {
+            device_key: device_values.copy()
+            for device_key, device_values in self.values_cache.items()
+        }
+
     def _flatten_sensor_payload(self, data: Dict[str, Any]) -> Dict[str, Any]:
         """Flatten incoming sensor payload to simple key/value pairs."""
         sensors: Dict[str, Any] = {}
@@ -178,16 +233,44 @@ class MQTTClient:
             }
         return snapshot
 
+    async def _build_metric_snapshots(self, device_key: str) -> tuple[Dict[str, Dict[str, Any]], Dict[str, Dict[str, Any]]]:
+        """Build separate snapshots for sensors and actuators."""
+        metrics = await get_metric_map(device_key)
+        sensors: Dict[str, Dict[str, Any]] = {}
+        actuators: Dict[str, Dict[str, Any]] = {}
+
+        for metric in metrics.values():
+            overrides: Dict[str, Any] = {}
+            if metric.display_name:
+                overrides['label'] = metric.display_name
+            if metric.unit:
+                overrides['unit'] = metric.unit
+            meta = build_metric_meta(metric.metric_key, overrides)
+
+            metric_info = {
+                'id': meta.id,
+                'label': meta.label,
+                'unit': meta.unit,
+                'color': meta.color,
+            }
+
+            if metric.metric_type == 'sensor':
+                sensors[metric.metric_key] = metric_info
+            elif metric.metric_type == 'actuator':
+                actuators[metric.metric_key] = metric_info
+
+        return sensors, actuators
+
     async def _publish_device_event(self, device: Device) -> None:
         try:
-            sensors = await self._build_metric_snapshot(device.device_key)
+            sensors, actuators = await self._build_metric_snapshots(device.device_key)
             payload = {
                 'type': 'device',
                 'device_id': device.device_key,
                 'is_active': device.is_active,
                 'last_seen': int(device.last_seen.timestamp() * 1000) if device.last_seen else None,
                 'sensors': sensors,
-                'actuators': [],
+                'actuators': actuators,
             }
             await event_broker.publish(payload)
         except Exception as exc:
@@ -201,7 +284,7 @@ class MQTTClient:
         definitions: List[Dict[str, Optional[str]]] = []
         seen: Set[str] = set()
 
-        def add_definition(metric_key: Optional[str], label: Optional[str], unit: Optional[str]) -> None:
+        def add_definition(metric_key: Optional[str], label: Optional[str], unit: Optional[str], metric_type: str) -> None:
             if not metric_key:
                 return
             key = str(metric_key).strip()
@@ -218,6 +301,7 @@ class MQTTClient:
                     'metric_key': key,
                     'display_name': meta.label,
                     'unit': meta.unit,
+                    'metric_type': metric_type,
                 }
             )
             seen.add(key)
@@ -225,22 +309,29 @@ class MQTTClient:
         if isinstance(sensors_payload, list):
             for item in sensors_payload:
                 if isinstance(item, dict):
-                    add_definition(item.get('id'), item.get('label'), item.get('unit'))
+                    add_definition(item.get('id'), item.get('label'), item.get('unit'), 'sensor')
         elif isinstance(sensors_payload, dict):
             for sensor_id, info in sensors_payload.items():
                 label = info.get('label') if isinstance(info, dict) else None
                 unit = info.get('unit') if isinstance(info, dict) else None
-                add_definition(sensor_id, label, unit)
+                add_definition(sensor_id, label, unit, 'sensor')
 
         if isinstance(actuators_payload, list):
             for entry in actuators_payload:
                 if isinstance(entry, dict):
-                    add_definition(entry.get('id') or entry.get('key'), entry.get('label'), entry.get('unit'))
+                    # Handle different actuator formats
+                    actuator_id = entry.get('id') or entry.get('key')
+
+                    # Handle ESP32 relay format: {"type": "relay", "number": 1, "label": "Relay 1"}
+                    if not actuator_id and entry.get('type') == 'relay' and 'number' in entry:
+                        actuator_id = f"relay{entry['number']}"
+
+                    add_definition(actuator_id, entry.get('label'), entry.get('unit'), 'actuator')
         elif isinstance(actuators_payload, dict):
             for actuator_id, info in actuators_payload.items():
                 label = info.get('label') if isinstance(info, dict) else None
                 unit = info.get('unit') if isinstance(info, dict) else None
-                add_definition(actuator_id, label, unit)
+                add_definition(actuator_id, label, unit, 'actuator')
 
         return definitions
 
@@ -315,6 +406,7 @@ class MQTTClient:
                 (f"{settings.mqtt_base_topic}/+/discovery", settings.mqtt_qos),  # Device capabilities (boot)
                 (f"{settings.mqtt_base_topic}/+/heartbeat", settings.mqtt_qos),  # Device heartbeat responses
                 (f"{settings.mqtt_base_topic}/+/relay/status", settings.mqtt_qos),  # Device-specific relay status
+                (f"{settings.mqtt_base_topic}/+/actuators", settings.mqtt_qos),  # Device-specific actuator state
             ]
 
             for topic, qos in topics:
@@ -408,6 +500,11 @@ class MQTTClient:
                 )
                 return
 
+            # Wait for discovery to complete before processing sensor data
+            if device_id not in self.discovery_completed:
+                logger.debug(f'Skipping sensor data for {device_id} - discovery not yet completed')
+                return
+
             sensors = self._flatten_sensor_payload(data)
             if not sensors:
                 await self._publish_error(
@@ -437,6 +534,8 @@ class MQTTClient:
                     continue
                 try:
                     await insert_reading(metric_id, value, timestamp=timestamp)
+                    # Update in-memory cache
+                    self._update_cache_value(device_id, sensor_name, value)
                 except Exception as exc:
                     logger.error(f"Failed to persist sensor reading for {device_id}/{sensor_name}: {exc}")
                     await self._publish_error(
@@ -520,6 +619,8 @@ class MQTTClient:
                     continue
                 try:
                     await insert_reading(metric_id, value, timestamp=timestamp)
+                    # Update in-memory cache
+                    self._update_cache_value(device_id, relay_key, value)
                 except Exception as exc:
                     logger.error(f"Failed to persist relay state for {device_id}/{relay_key}: {exc}")
                     await self._publish_error(
@@ -532,7 +633,7 @@ class MQTTClient:
                 'type': 'reading',
                 'device_id': device_id,
                 'timestamp': int(timestamp.timestamp() * 1000),
-                'sensors': relay_values,
+                'actuators': relay_values,
             })
 
             await self._publish_device_event(device)
@@ -610,6 +711,8 @@ class MQTTClient:
 
             try:
                 await insert_reading(metric_id, state_value, timestamp=timestamp)
+                # Update in-memory cache
+                self._update_cache_value(device_id, relay_key, state_value)
             except Exception as exc:
                 logger.error(f"Failed to persist critical relay state for {device_id}/{relay_key}: {exc}")
                 await self._publish_error(
@@ -622,7 +725,7 @@ class MQTTClient:
                 'type': 'reading',
                 'device_id': device_id,
                 'timestamp': int(timestamp.timestamp() * 1000),
-                'sensors': {relay_key: state_value},
+                'actuators': {relay_key: state_value},
             })
 
             await self._publish_device_event(device)
@@ -681,6 +784,9 @@ class MQTTClient:
                 if canonical_id:
                     await self._handle_heartbeat(canonical_id, data if isinstance(data, dict) else {})
             elif message_type == 'relay' and len(parts) >= base_len + 3 and parts[base_len + 2] == 'status':
+                payload = {**data, 'device_id': canonical_id} if isinstance(data, dict) else {'device_id': canonical_id}
+                await self._handle_relay_status(topic, payload)
+            elif message_type == 'actuators':
                 payload = {**data, 'device_id': canonical_id} if isinstance(data, dict) else {'device_id': canonical_id}
                 await self._handle_relay_status(topic, payload)
             else:
@@ -744,6 +850,10 @@ class MQTTClient:
 
             await self._publish_device_event(device)
 
+            # Mark discovery as completed for this device
+            self.discovery_completed.add(canonical_id)
+            logger.info(f"Discovery completed for device {canonical_id}")
+
         except Exception as exc:
             logger.error(f"Error handling discovery payload for {device_id}: {exc}")
 
@@ -794,6 +904,25 @@ class MQTTClient:
 
         except Exception as exc:
             logger.error(f"Error publishing relay control: {exc}")
+            raise
+
+    async def publish_actuator_control(self, device_id: str, actuator_control: ActuatorControl):
+        """Publish generic actuator control command to ESP32"""
+        if not self.client or not self.is_connected:
+            raise Exception("MQTT client not connected")
+
+        try:
+            topic = f"esp32/{device_id}/control"
+            payload = {
+                "actuator": actuator_control.actuator_key,
+                "state": actuator_control.state,
+            }
+
+            self.client.publish(topic, json.dumps(payload), qos=settings.mqtt_qos)
+            logger.info(f"Published actuator control command to {topic}: {payload}")
+
+        except Exception as exc:
+            logger.error(f"Error publishing actuator control: {exc}")
             raise
 
     async def disconnect(self):

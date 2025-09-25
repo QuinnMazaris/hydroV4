@@ -62,11 +62,18 @@ async def sync_device_metrics(
         key = (definition.get("metric_key") or definition.get("key") or "").strip()
         if not key:
             continue
+        metric_type = definition.get("metric_type")
+        if not metric_type:
+            raise ValueError(f"metric_type is required for metric '{key}' but was not provided in discovery data")
+        if metric_type not in ["sensor", "actuator"]:
+            raise ValueError(f"metric_type must be 'sensor' or 'actuator', got '{metric_type}' for metric '{key}'")
+
         normalized.append(
             {
                 "metric_key": key,
                 "display_name": (definition.get("display_name") or definition.get("label") or key) or key,
                 "unit": (definition.get("unit") or None) or None,
+                "metric_type": metric_type,
             }
         )
 
@@ -93,6 +100,9 @@ async def sync_device_metrics(
                 if metric.unit != item["unit"]:
                     metric.unit = item["unit"]
                     updated = True
+                if metric.metric_type != item["metric_type"]:
+                    metric.metric_type = item["metric_type"]
+                    updated = True
                 if updated:
                     session.add(metric)
             else:
@@ -101,6 +111,7 @@ async def sync_device_metrics(
                     metric_key=item["metric_key"],
                     display_name=item["display_name"],
                     unit=item["unit"],
+                    metric_type=item["metric_type"],
                 )
                 session.add(metric)
                 existing[item["metric_key"]] = metric

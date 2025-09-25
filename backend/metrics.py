@@ -37,3 +37,4 @@ def build_metric_meta(metric_id: str, overrides: Optional[Dict[str, str]] = None
         color=overrides.get("color") or color_for_id(metric_id),
         unit=overrides.get("unit"),
     )
+
