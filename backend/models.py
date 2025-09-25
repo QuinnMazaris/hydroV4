@@ -140,11 +140,6 @@ class ReadingResponse(ReadingCreate):
         from_attributes = True
 
 
-class RelayControl(BaseModel):
-    relay: int  # 1-16
-    state: str  # "on" or "off"
-
-
 class ActuatorControl(BaseModel):
     actuator_key: str  # The metric key (e.g. "relay1", "pump", "valve_a")
     state: str  # "on", "off", or other actuator-specific states

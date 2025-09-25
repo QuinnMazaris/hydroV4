@@ -13,7 +13,7 @@ from .config import settings
 from .database import AsyncSessionLocal, get_db, init_db
 from .events import event_broker
 from .metrics import build_metric_meta
-from .models import ActuatorControl, Device, DeviceResponse, Metric, Reading, RelayControl
+from .models import ActuatorControl, Device, DeviceResponse, Metric, Reading
 from .mqtt_client import mqtt_client
 from .services.persistence import delete_old_readings
 
@@ -641,35 +641,6 @@ async def get_device_capabilities(
     }
 
 # Device control endpoint
-
-@app.post("/api/actuators/{device_id}/relay/control")
-async def control_relay(
-    device_id: str,
-    relay_control: RelayControl,
-    db: AsyncSession = Depends(get_db),
-):
-    """Control relay state via MQTT after validating the target metric exists."""
-    if not 1 <= relay_control.relay <= 16:
-        raise HTTPException(status_code=400, detail="Relay number must be between 1 and 16")
-
-    if relay_control.state not in ["on", "off"]:
-        raise HTTPException(status_code=400, detail="State must be 'on' or 'off'")
-
-    metric_key = f"relay{relay_control.relay}"
-    metric_row = await db.execute(
-        select(Metric)
-        .join(Device, Device.id == Metric.device_id)
-        .where((Device.device_key == device_id) & (Metric.metric_key == metric_key))
-    )
-    metric_obj = metric_row.scalar_one_or_none()
-    if not metric_obj:
-        raise HTTPException(status_code=404, detail=f"Relay metric {metric_key} not registered for device")
-
-    try:
-        await mqtt_client.publish_relay_control(device_id, relay_control)
-        return {"message": f"Relay {relay_control.relay} control command sent", "status": "success"}
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Failed to send relay command: {exc}")
 
 
 @app.post("/api/actuators/{device_id}/control")

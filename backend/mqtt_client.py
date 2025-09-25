@@ -12,7 +12,7 @@ from .config import settings
 from .database import AsyncSessionLocal
 from .events import event_broker
 from .metrics import build_metric_meta
-from .models import ActuatorControl, Device, Metric, Reading, RelayControl
+from .models import ActuatorControl, Device, Metric, Reading
 from .services.persistence import (
     get_metric_map,
     get_metric_by_key,
@@ -886,25 +886,6 @@ class MQTTClient:
 
         except Exception as exc:
             logger.error(f"Error marking inactive devices: {exc}")
-
-    async def publish_relay_control(self, device_id: str, relay_control: RelayControl):
-        """Publish relay control command to ESP32"""
-        if not self.client or not self.is_connected:
-            raise Exception("MQTT client not connected")
-
-        try:
-            topic = f"esp32/{device_id}/control"
-            payload = {
-                "relay": relay_control.relay,
-                "state": relay_control.state,
-            }
-
-            self.client.publish(topic, json.dumps(payload), qos=settings.mqtt_qos)
-            logger.info(f"Published relay control command to {topic}: {payload}")
-
-        except Exception as exc:
-            logger.error(f"Error publishing relay control: {exc}")
-            raise
 
     async def publish_actuator_control(self, device_id: str, actuator_control: ActuatorControl):
         """Publish generic actuator control command to ESP32"""
