@@ -2,11 +2,11 @@
 
 import { useEffect, useMemo, useRef, useState } from "react"
 
-export type MetricPoint = { timestamp: number; value: number }
+export type MetricPoint = { timestamp: number; value: any }
 
 export type DeviceLatest = {
   timestamp: number
-  metrics: Record<string, number>
+  metrics: Record<string, unknown>
 }
 
 export type MetricMeta = { label?: string; unit?: string; color?: string }
@@ -42,9 +42,11 @@ export function useWsSensors(options?: {
   const { url, maxPointsPerSeries = 2000, fps = 4 } = options || {}
   const resolvedUrl = url || defaultUrl
 
-  const buffersRef = useRef<Record<string, Record<string, MetricPoint[]>>>({})
+  const sensorBuffersRef = useRef<Record<string, Record<string, MetricPoint[]>>>({})
+  const actuatorBuffersRef = useRef<Record<string, Record<string, MetricPoint[]>>>({})
   const [devices, setDevices] = useState<DevicesMap>({})
-  const [snapshot, setSnapshot] = useState<Record<string, Record<string, MetricPoint[]>>>({})
+  const [sensorSnapshot, setSensorSnapshot] = useState<Record<string, Record<string, MetricPoint[]>>>({})
+  const [actuatorSnapshot, setActuatorSnapshot] = useState<Record<string, Record<string, MetricPoint[]>>>({})
   const [status, setStatus] = useState<"connecting" | "live" | "disconnected">("connecting")
   const [errors, setErrors] = useState<DataError[]>([])
   const throttleRef = useRef<number | null>(null)
@@ -94,14 +96,29 @@ export function useWsSensors(options?: {
                 }
                 return next
               })
-              const buffers = buffersRef.current
+              const sensorBuffers = sensorBuffersRef.current
+              const actuatorBuffers = actuatorBuffersRef.current
 
               // 1) Hydrate history (last 24h) first
               if (ev.history) {
                 for (const [deviceId, metrics] of Object.entries(ev.history)) {
-                  const series = (buffers[deviceId] ||= {})
+                  const deviceInfo = ev.devices?.[deviceId]
+                  const sensorSeries = (sensorBuffers[deviceId] ||= {})
+                  const actuatorSeries = (actuatorBuffers[deviceId] ||= {})
+
+                  const resolveSeries = (metricName: string) => {
+                    if (actuatorSeries[metricName]) return actuatorSeries[metricName]
+                    if (sensorSeries[metricName]) return sensorSeries[metricName]
+                    if (deviceInfo?.actuators && metricName in deviceInfo.actuators) {
+                      actuatorSeries[metricName] = []
+                      return actuatorSeries[metricName]
+                    }
+                    sensorSeries[metricName] = []
+                    return sensorSeries[metricName]
+                  }
+
                   for (const [metricName, points] of Object.entries(metrics)) {
-                    const arr = (series[metricName] ||= [])
+                    const arr = resolveSeries(metricName)
                     for (const p of points) {
                       const last = arr[arr.length - 1]
                       if (!last || p.timestamp > last.timestamp) {
@@ -113,24 +130,40 @@ export function useWsSensors(options?: {
                         if (!arr.some((x) => x.timestamp === p.timestamp)) arr.push({ timestamp: p.timestamp, value: p.value })
                       }
                     }
-                    if (arr.length > maxPointsPerSeries) series[metricName] = arr.slice(-maxPointsPerSeries)
+                    if (arr.length > maxPointsPerSeries) {
+                      const trimmed = arr.slice(-maxPointsPerSeries)
+                      if (actuatorSeries[metricName] === arr) {
+                        actuatorSeries[metricName] = trimmed
+                      } else {
+                        sensorSeries[metricName] = trimmed
+                      }
+                    }
                   }
                 }
               }
 
               // 2) Then apply single latest point per device (skip if duplicate timestamp)
               for (const [deviceId, latest] of Object.entries(ev.latest || {})) {
-                const series = (buffers[deviceId] ||= {})
+                const deviceInfo = ev.devices?.[deviceId]
+                const sensorSeries = (sensorBuffers[deviceId] ||= {})
+                const actuatorSeries = (actuatorBuffers[deviceId] ||= {})
                 const ts = latest.timestamp
-                for (const [metricName, value] of Object.entries(latest.metrics)) {
-                  const arr = (series[metricName] ||= [])
+                for (const [metricName, rawValue] of Object.entries(latest.metrics)) {
+                  const metricData = (rawValue && typeof rawValue === 'object') ? (rawValue as Record<string, unknown>) : null
+                  const value = metricData && 'value' in metricData ? (metricData.value as unknown) : rawValue
+                  const valueTimestamp = metricData && typeof metricData.timestamp === 'number' ? metricData.timestamp : ts
+                  const isActuator = !!(deviceInfo?.actuators && metricName in deviceInfo.actuators) || !!actuatorSeries[metricName]
+                  const seriesMap = isActuator ? actuatorSeries : sensorSeries
+                  const arr = (seriesMap[metricName] ||= [])
                   const last = arr[arr.length - 1]
-                  if (!last || ts > last.timestamp) {
-                    arr.push({ timestamp: ts, value })
-                  } else if (last.timestamp === ts) {
+                  if (!last || valueTimestamp > last.timestamp) {
+                    arr.push({ timestamp: valueTimestamp, value })
+                  } else if (last.timestamp === valueTimestamp) {
                     last.value = value
                   }
-                  if (arr.length > maxPointsPerSeries) series[metricName] = arr.slice(-maxPointsPerSeries)
+                  if (arr.length > maxPointsPerSeries) {
+                    seriesMap[metricName] = arr.slice(-maxPointsPerSeries)
+                  }
                 }
               }
               scheduleCommit()
@@ -159,14 +192,14 @@ export function useWsSensors(options?: {
                 return next.slice(-20)
               })
             } else if (ev.type === "reading") {
-              const buffers = buffersRef.current
-              const series = (buffers[ev.device_id] ||= {})
+              const sensorSeries = (sensorBuffersRef.current[ev.device_id] ||= {})
+              const actuatorSeries = (actuatorBuffersRef.current[ev.device_id] ||= {})
               const ts = ev.timestamp
 
               // Process sensor readings
               if (ev.sensors) {
                 for (const [sensorName, value] of Object.entries(ev.sensors)) {
-                  const arr = (series[sensorName] ||= [])
+                  const arr = (sensorSeries[sensorName] ||= [])
                   const last = arr[arr.length - 1]
                   // If same timestamp as last point, update in place to avoid shape changes
                   if (last && last.timestamp === ts) {
@@ -174,14 +207,16 @@ export function useWsSensors(options?: {
                   } else {
                     arr.push({ timestamp: ts, value })
                   }
-                  if (arr.length > maxPointsPerSeries) series[sensorName] = arr.slice(-maxPointsPerSeries)
+                  if (arr.length > maxPointsPerSeries) {
+                    sensorSeries[sensorName] = arr.slice(-maxPointsPerSeries)
+                  }
                 }
               }
 
               // Process actuator readings
               if (ev.actuators) {
                 for (const [actuatorName, value] of Object.entries(ev.actuators)) {
-                  const arr = (series[actuatorName] ||= [])
+                  const arr = (actuatorSeries[actuatorName] ||= [])
                   const last = arr[arr.length - 1]
                   // If same timestamp as last point, update in place to avoid shape changes
                   if (last && last.timestamp === ts) {
@@ -189,7 +224,9 @@ export function useWsSensors(options?: {
                   } else {
                     arr.push({ timestamp: ts, value })
                   }
-                  if (arr.length > maxPointsPerSeries) series[actuatorName] = arr.slice(-maxPointsPerSeries)
+                  if (arr.length > maxPointsPerSeries) {
+                    actuatorSeries[actuatorName] = arr.slice(-maxPointsPerSeries)
+                  }
                 }
               }
 
@@ -208,7 +245,8 @@ export function useWsSensors(options?: {
       throttleRef.current = window.setTimeout(() => {
         throttleRef.current = null
         // shallow copy to freeze structure for React
-        setSnapshot({ ...buffersRef.current })
+        setSensorSnapshot({ ...sensorBuffersRef.current })
+        setActuatorSnapshot({ ...actuatorBuffersRef.current })
       }, 1000 / Math.max(1, fps))
     }
 
@@ -221,8 +259,9 @@ export function useWsSensors(options?: {
     }
   }, [resolvedUrl, maxPointsPerSeries, fps])
 
-  const api = useMemo(() => ({ sensorsByDevice: snapshot, devices, status, errors }), [snapshot, devices, status, errors])
+  const api = useMemo(
+    () => ({ sensorsByDevice: sensorSnapshot, actuatorsByDevice: actuatorSnapshot, devices, status, errors }),
+    [sensorSnapshot, actuatorSnapshot, devices, status, errors],
+  )
   return api
 }
-
-

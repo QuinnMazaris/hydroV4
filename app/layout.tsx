@@ -7,9 +7,12 @@ import { Suspense } from "react"
 import "./globals.css"
 
 export const metadata: Metadata = {
-  title: "Analytics Dashboard",
+  title: "Hydro",
   description: "OpenAI-inspired analytics dashboard with live metrics",
   generator: "v0.app",
+  icons: {
+    icon: "/leaf-icon.svg",
+  },
 }
 
 export default function RootLayout({

@@ -1,6 +1,7 @@
 import asyncio
 import json
 import queue
+import re
 from datetime import datetime, timedelta
 from typing import Any, Callable, Dict, List, Optional, Set
 
@@ -893,14 +894,39 @@ class MQTTClient:
             raise Exception("MQTT client not connected")
 
         try:
-            topic = f"esp32/{device_id}/control"
-            payload = {
+            topic_template = settings.relay_control_topic.strip()
+            resolved_topics: Set[str] = set()
+
+            # Normalize device identifier for topic usage (replace whitespace / disallowed chars)
+            normalized_device_id = re.sub(r"[^A-Za-z0-9_\-]", "_", device_id.strip()) or device_id
+
+            # Always include device-specific control topic expected by ESP32 firmware
+            base_topic = settings.mqtt_base_topic.strip('/')
+            resolved_topics.add(f"{base_topic}/{normalized_device_id}/control")
+
+            # Honour optional template/environment override for additional topics
+            if topic_template:
+                formatted = topic_template
+                if "{device_id}" in topic_template:
+                    formatted = topic_template.format(device_id=normalized_device_id)
+                resolved_topics.add(formatted)
+
+            payload: Dict[str, Any] = {
+                "device_id": device_id,
                 "actuator": actuator_control.actuator_key,
                 "state": actuator_control.state,
             }
 
-            self.client.publish(topic, json.dumps(payload), qos=settings.mqtt_qos)
-            logger.info(f"Published actuator control command to {topic}: {payload}")
+            # Provide numeric relay identifier when using conventional relay keys (e.g. relay1)
+            if actuator_control.actuator_key.lower().startswith("relay"):
+                suffix = actuator_control.actuator_key[5:]
+                if suffix.isdigit():
+                    payload["relay"] = int(suffix)
+
+            for topic in sorted(resolved_topics):
+                normalized_topic = topic.strip('/')
+                self.client.publish(normalized_topic, json.dumps(payload), qos=settings.mqtt_qos)
+                logger.info(f"Published actuator control command to {normalized_topic}: {payload}")
 
         except Exception as exc:
             logger.error(f"Error publishing actuator control: {exc}")
