@@ -64,15 +64,12 @@ export function DeviceToggle({ id, label, checked, loading = false, disabled = f
         loading && "cursor-wait opacity-70",
         disabled && "cursor-not-allowed opacity-50",
         checked
-          ? "bg-emerald-950/30 border-emerald-400/30 shadow-emerald-400/20"
+          ? "bg-emerald-950/30 border-emerald-400/30"
           : "bg-black/55 hover:bg-black/60"
       )}
       onClick={handleClick}
       style={{
-        backgroundColor: checked ? "rgba(16, 185, 129, 0.1)" : "rgba(0, 0, 0, 0.55)",
-        boxShadow: checked
-          ? "0 20px 25px -5px rgba(16, 185, 129, 0.3), 0 10px 10px -5px rgba(16, 185, 129, 0.1)"
-          : undefined
+        backgroundColor: checked ? "rgba(16, 185, 129, 0.1)" : "rgba(0, 0, 0, 0.55)"
       }}
     >
       <div className="flex h-full flex-col">

@@ -65,6 +65,7 @@ COPY --from=frontend-builder /app/styles ./frontend/styles
 ENV PYTHONPATH=/app
 ENV NODE_ENV=production
 ENV PORT=3001
+ENV MQTT_BROKER=127.0.0.1
 
 # Expose ports
 EXPOSE 3001 8000

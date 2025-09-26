@@ -4,7 +4,7 @@ import os
 
 class Settings(BaseSettings):
     # MQTT Configuration
-    mqtt_broker: str = "localhost"
+    mqtt_broker: str = "127.0.0.1"
     mqtt_port: int = 1883
     mqtt_username: Optional[str] = None
     mqtt_password: Optional[str] = None

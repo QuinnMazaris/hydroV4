@@ -110,7 +110,7 @@ Key configuration options in `.env`:
 
 ```env
 # MQTT Broker
-MQTT_BROKER=localhost
+MQTT_BROKER=127.0.0.1  # Defaults to IPv4 loopback; override if your broker runs elsewhere
 MQTT_PORT=1883
 
 # Topics
