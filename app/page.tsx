@@ -5,13 +5,12 @@ import { useMemo, useState } from "react"
 
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
-import { Button } from "@/components/ui/button"
 import { LineChart, Line, XAxis, YAxis, ResponsiveContainer } from "recharts"
-import { Activity, ChevronRight, Leaf } from "lucide-react"
+import { Activity, ChevronRight } from "lucide-react"
 
 import { describeValue, resolveMetricMeta } from "@/lib/metrics"
 import { useWsSensors } from "@/hooks/use-ws-metrics"
-import type { DeviceInfo } from "@/hooks/use-ws-metrics"
+import { DeviceToggle } from "@/components/device-toggle"
 
 interface MetricCardProps {
   title: string
@@ -93,6 +92,7 @@ export default function Dashboard() {
   }
 
   const [actuatorBusy, setActuatorBusy] = useState<Record<string, boolean>>({})
+  const [optimisticActuatorStates, setOptimisticActuatorStates] = useState<Record<string, any>>({})
 
   const actuatorDevices = useMemo(() => {
     return Object.entries(devices)
@@ -100,7 +100,10 @@ export default function Dashboard() {
         const actuatorEntries = info.actuators || {}
         const actuators: ActuatorInfo[] = Object.entries(actuatorEntries).map(([key, meta]) => {
           // Get current state from the actuator stream (live data)
-          const currentState = actuatorsByDevice[deviceId]?.[key]?.[actuatorsByDevice[deviceId][key].length - 1]?.value
+          const liveState = actuatorsByDevice[deviceId]?.[key]?.[actuatorsByDevice[deviceId][key].length - 1]?.value
+          const optimisticKey = `${deviceId}:${key}`
+          // Use optimistic state if available, otherwise fall back to live state
+          const currentState = optimisticKey in optimisticActuatorStates ? optimisticActuatorStates[optimisticKey] : liveState
           return {
             key,
             label: meta.label || key,
@@ -111,24 +114,24 @@ export default function Dashboard() {
         })
         return {
           deviceId,
-          deviceType: 'device',
           actuators,
         }
       })
       .filter((entry) => entry.actuators.length > 0)
       .sort((a, b) => a.deviceId.localeCompare(b.deviceId))
-  }, [devices, actuatorsByDevice])
+  }, [devices, actuatorsByDevice, optimisticActuatorStates])
 
   const recentErrors = useMemo(() => errors.slice(-5).reverse(), [errors])
 
   const handleActuatorToggle = async (deviceId: string, actuator: ActuatorInfo) => {
+    console.log('🔄 Toggle clicked:', { deviceId, actuator })
     if (!actuator || !actuator.key) {
       console.warn('Invalid actuator', deviceId, actuator)
       return
     }
 
     const busyKey = `${deviceId}:${actuator.key}`
-    setActuatorBusy((prev) => ({ ...prev, [busyKey]: true }))
+    const optimisticKey = `${deviceId}:${actuator.key}`
 
     // Determine next state based on current state
     const currentState = actuator.currentState
@@ -141,22 +144,49 @@ export default function Dashboard() {
       nextState = 'on' // Default to turning on if unknown state
     }
 
+    // Optimistic update - immediately update UI
+    setOptimisticActuatorStates((prev) => ({ ...prev, [optimisticKey]: nextState }))
+    setActuatorBusy((prev) => ({ ...prev, [busyKey]: true }))
+
     try {
-      const apiBase = process.env.NEXT_PUBLIC_API_BASE_URL ?? (process.env.NODE_ENV === 'development' ? 'http://localhost:8000' : '')
-      const res = await fetch(`${apiBase}/api/actuators/${deviceId}/control`, {
+      // Use Next.js rewrite for API calls - this goes through the proxy
+      const url = `/api/actuators/${deviceId}/control`
+      const payload = {
+        actuator_key: actuator.key,
+        state: nextState
+      }
+      console.log('📡 API Request:', { url, payload })
+
+      const res = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          actuator_key: actuator.key,
-          state: nextState
-        }),
+        body: JSON.stringify(payload),
       })
       if (!res.ok) {
         const message = await res.text()
+        console.error('❌ API Error:', { status: res.status, message })
         throw new Error(message || 'Failed to send actuator command')
       }
+      console.log('✅ API Success') // API call succeeded
+
+      // Clear optimistic state after successful API call - let live data take over
+      setTimeout(() => {
+        setOptimisticActuatorStates((prev) => {
+          const next = { ...prev }
+          delete next[optimisticKey]
+          return next
+        })
+      }, 1000) // Give live data time to arrive via WebSocket
     } catch (error) {
       console.error('Failed to send actuator command', error)
+
+      // Revert optimistic update on error
+      setOptimisticActuatorStates((prev) => {
+        const next = { ...prev }
+        delete next[optimisticKey]
+        return next
+      })
+
       if (typeof window !== 'undefined') {
         window.alert?.('Failed to send actuator command.')
       }
@@ -256,7 +286,7 @@ export default function Dashboard() {
     <div className="relative min-h-screen overflow-hidden text-foreground">
       <div className="absolute inset-0">
         <img src="/bg.jpeg" alt="" className="h-full w-full object-cover" aria-hidden="true" />
-        <div className="absolute inset-0 bg-black/70" aria-hidden="true" />
+        <div className="absolute inset-0 bg-black/50" aria-hidden="true" />
       </div>
 
       <div className="relative z-10 flex min-h-screen flex-col">
@@ -267,9 +297,9 @@ export default function Dashboard() {
               <div className="flex items-center space-x-4">
                 <div className="flex items-center space-x-2">
                   <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary">
-                    <Leaf className="h-5 w-5 text-primary-foreground" />
+                    <Activity className="h-5 w-5 text-primary-foreground" />
                   </div>
-                  <h1 className="text-xl font-semibold text-foreground">Hydro</h1>
+                  <h1 className="text-xl font-semibold text-foreground">Hydro Dashboard</h1>
                 </div>
                 <Badge
                   variant={status === "live" ? "secondary" : status === "connecting" ? "secondary" : "destructive"}
@@ -302,37 +332,79 @@ export default function Dashboard() {
           </div>
 
           {/* Bottom Section */}
-          <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
-            {/* System Status */}
-            <Card className="bg-black/50 border-white/10 backdrop-blur-xl shadow-xl">
-              <CardHeader>
-                <CardTitle className="text-lg font-semibold text-foreground">System Status</CardTitle>
-              </CardHeader>
-              <CardContent className="space-y-4">
-                {Object.entries(devices).map(([deviceId, info]) => (
-                  <div key={deviceId} className="rounded-xl border border-white/10 bg-black/40 p-3 backdrop-blur">
-                    <div className="flex items-center justify-between gap-3">
-                      <div className="flex items-center space-x-3">
-                        <div className={`h-2 w-2 rounded-full ${info.is_active ? "bg-chart-1" : "bg-destructive"}`}></div>
-                        <span className="text-sm font-medium text-foreground">{deviceId}</span>
-                      </div>
-                      <Badge variant={info.is_active ? "default" : "destructive"} className="text-xs">
-                        {info.is_active ? "Active" : "Inactive"}
-                      </Badge>
-                    </div>
-                    <div className="mt-2 flex items-center justify-between text-xs text-muted-foreground">
-                      <span className="capitalize">device</span>
-                      <span>{formatRelativeTime(info.last_seen)}</span>
-                    </div>
+          {actuatorDevices.length > 0 && (
+            <section className="mb-12 space-y-6">
+              {actuatorDevices.map(({ deviceId, actuators }) => (
+                <div key={deviceId} className="space-y-3">
+                  <div className="flex items-center justify-between text-sm text-muted-foreground">
+                    <span className="font-medium text-foreground">{deviceId}</span>
+                    <span>
+                      {actuators.length} actuator{actuators.length === 1 ? "" : "s"}
+                    </span>
                   </div>
-                ))}
-              </CardContent>
-            </Card>
+                  <div className="grid gap-6 grid-cols-2 md:grid-cols-4 lg:grid-cols-6">
+                    {actuators.map((actuator) => {
+                      const busyKey = `${deviceId}:${actuator.key}`
+                      const busy = actuatorBusy[busyKey] ?? false
 
-            {/* Recent Activity */}
+                      let stateLabel: string
+                      let isOn: boolean
+                      if (typeof actuator.currentState === "boolean") {
+                        isOn = actuator.currentState
+                        stateLabel = isOn ? "on" : "off"
+                      } else if (typeof actuator.currentState === "string") {
+                        stateLabel = actuator.currentState.toLowerCase()
+                        isOn = stateLabel === "on"
+                      } else {
+                        stateLabel = "unknown"
+                        isOn = false
+                      }
+
+                      const label = actuator.label || actuator.key
+
+                      return (
+                        <DeviceToggle
+                          key={busyKey}
+                          id={busyKey}
+                          label={label}
+                          checked={isOn}
+                          loading={busy}
+                          onToggle={() => handleActuatorToggle(deviceId, actuator)}
+                        />
+                      )
+                    })}
+                  </div>
+                </div>
+              ))}
+            </section>
+          )}
+
+          <div className="space-y-6">
+            {recentErrors.length > 0 && (
+              <Card className="bg-black/50 border-white/10 backdrop-blur-xl shadow-xl">
+                <CardHeader>
+                  <CardTitle className="text-lg font-semibold text-foreground">Incoming Issues</CardTitle>
+                </CardHeader>
+                <CardContent className="space-y-3">
+                  {recentErrors.map((error, index) => (
+                    <div
+                      key={`${error.code || 'error'}:${index}`}
+                      className="rounded-xl border border-destructive/30 bg-destructive/30 p-3 text-sm backdrop-blur"
+                    >
+                      <div className="flex items-center justify-between">
+                        <span className="font-medium text-destructive">{error.code || 'Unknown data'}</span>
+                        <span className="text-xs text-muted-foreground">{formatRelativeTime(error.ts)}</span>
+                      </div>
+                      <p className="mt-1 text-destructive-foreground">{error.message}</p>
+                    </div>
+                  ))}
+                </CardContent>
+              </Card>
+            )}
+
             <Card className="bg-black/50 border-white/10 backdrop-blur-xl shadow-xl">
               <CardHeader>
-                <CardTitle className="text-lg font-semibold text-foreground">Recent Activity</CardTitle>
+                <CardTitle className="text-lg font-semibold text-foreground">Device Overview</CardTitle>
               </CardHeader>
               <CardContent className="space-y-4">
                 {deviceActivities.length === 0 ? (
@@ -367,87 +439,6 @@ export default function Dashboard() {
                 )}
               </CardContent>
             </Card>
-
-            <div className="space-y-6">
-              {recentErrors.length > 0 && (
-                <Card className="bg-black/50 border-white/10 backdrop-blur-xl shadow-xl">
-                  <CardHeader>
-                    <CardTitle className="text-lg font-semibold text-foreground">Incoming Issues</CardTitle>
-                  </CardHeader>
-                  <CardContent className="space-y-3">
-                    {recentErrors.map((error, index) => (
-                      <div key={`${error.code || 'error'}:${index}`} className="rounded-xl border border-destructive/30 bg-destructive/30 p-3 text-sm backdrop-blur">
-                        <div className="flex items-center justify-between">
-                          <span className="font-medium text-destructive">{error.code || 'Unknown data'}</span>
-                          <span className="text-xs text-muted-foreground">{formatRelativeTime(error.ts)}</span>
-                        </div>
-                        <p className="mt-1 text-destructive-foreground">{error.message}</p>
-                      </div>
-                    ))}
-                  </CardContent>
-                </Card>
-              )}
-
-              <Card className="bg-black/50 border-white/10 backdrop-blur-xl shadow-xl">
-                <CardHeader>
-                  <CardTitle className="text-lg font-semibold text-foreground">Device Controls</CardTitle>
-                </CardHeader>
-                <CardContent className="space-y-4">
-                  {actuatorDevices.length === 0 ? (
-                    <div className="text-sm text-muted-foreground">Awaiting actuator discovery data.</div>
-                  ) : (
-                    actuatorDevices.map(({ deviceId, deviceType, actuators }) => (
-                      <div key={deviceId} className="space-y-3 rounded-xl border border-white/10 bg-black/40 p-3 backdrop-blur">
-                        <div className="flex items-center justify-between text-sm text-foreground">
-                          <span className="font-medium">{deviceId}</span>
-                          <span className="text-xs text-muted-foreground">{deviceType}</span>
-                        </div>
-                        <div className="space-y-2">
-                          {actuators.map((actuator) => {
-                            const busyKey = `${deviceId}:${actuator.key}`
-                            const busy = actuatorBusy[busyKey] ?? false
-
-                            // Determine current state from actuator stream
-                            let stateLabel: string
-                            let isOn: boolean
-                            if (typeof actuator.currentState === 'boolean') {
-                              isOn = actuator.currentState
-                              stateLabel = isOn ? 'on' : 'off'
-                            } else if (typeof actuator.currentState === 'string') {
-                              stateLabel = actuator.currentState.toLowerCase()
-                              isOn = stateLabel === 'on'
-                            } else {
-                              stateLabel = 'unknown'
-                              isOn = false
-                            }
-
-                            const label = actuator.label || actuator.key
-
-                            return (
-                              <div key={busyKey} className="flex items-center justify-between gap-3 rounded-lg border border-white/10 bg-black/30 px-3 py-2 backdrop-blur">
-                                <div className="flex flex-col">
-                                  <span className="text-sm text-foreground">{label}</span>
-                                  <span className="text-xs text-muted-foreground capitalize">{stateLabel}</span>
-                                </div>
-                                <Button
-                                  size="sm"
-                                  variant={isOn ? 'destructive' : 'default'}
-                                  disabled={busy}
-                                  onClick={() => handleActuatorToggle(deviceId, actuator)}
-                                  className="backdrop-blur"
-                                >
-                                  {busy ? 'Sending...' : isOn ? 'Turn Off' : 'Turn On'}
-                                </Button>
-                              </div>
-                            )
-                          })}
-                        </div>
-                      </div>
-                    ))
-                  )}
-                </CardContent>
-              </Card>
-            </div>
           </div>
         </div>
       </div>
