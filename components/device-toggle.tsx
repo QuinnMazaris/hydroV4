@@ -2,7 +2,7 @@
 
 import { Loader2 } from "lucide-react"
 import { cn } from "@/lib/utils"
-import { Card, CardContent, CardHeader } from "@/components/ui/card"
+import { Card } from "@/components/ui/card"
 
 interface DeviceToggleProps {
   id: string
@@ -20,7 +20,7 @@ export function DeviceToggle({ id, label, checked, loading = false, disabled = f
   }
 
   const PlantAnimation = ({ isActive, id }: { isActive: boolean, id: string }) => (
-    <div className="relative w-full h-16 sm:h-20 md:h-24 flex items-center justify-center">
+    <div className="relative w-full h-full flex items-center justify-center">
       {isActive ? (
         <svg viewBox="0 0 24 24" className="w-full h-full" xmlns="http://www.w3.org/2000/svg">
           <defs>
@@ -59,7 +59,7 @@ export function DeviceToggle({ id, label, checked, loading = false, disabled = f
   return (
     <Card
       className={cn(
-        "h-24 cursor-pointer transition-all duration-300 border-white/10 backdrop-blur-xl shadow-xl",
+        "w-full aspect-square p-0 overflow-hidden cursor-pointer transition-all duration-300 border-white/10 backdrop-blur-xl shadow-xl",
         "hover:scale-[1.02] hover:shadow-2xl",
         loading && "cursor-wait opacity-70",
         disabled && "cursor-not-allowed opacity-50",
@@ -75,35 +75,22 @@ export function DeviceToggle({ id, label, checked, loading = false, disabled = f
           : undefined
       }}
     >
-      <CardHeader className="pb-1 px-2 pt-2">
-        <div className="flex flex-col items-center gap-0.5">
-          <div className="transition-all duration-300 flex items-center justify-center w-full">
+      <div className="flex h-full flex-col">
+        <div className="flex-1 min-h-0 p-3 flex items-center justify-center">
+          <div className="w-full h-full flex items-center justify-center">
             {loading ? (
-              <Loader2 className="h-5 w-5 animate-spin text-emerald-300" />
+              <Loader2 className="w-1/2 h-1/2 animate-spin text-emerald-300" />
             ) : (
               <PlantAnimation isActive={checked} id={id} />
             )}
           </div>
         </div>
-      </CardHeader>
-      <CardContent className="pt-0 px-2 pb-3">
-        <h3 className="mt-2 text-sm sm:text-base font-semibold text-foreground truncate text-center leading-tight">{label}</h3>
-        <div className="mt-2 flex items-center">
-          <div
-            className={cn(
-              "h-1 w-full rounded-full transition-all duration-500",
-              checked ? "bg-emerald-400/30" : "bg-white/20"
-            )}
-          >
-            <div
-              className={cn(
-                "h-full rounded-full transition-all duration-700 ease-out",
-                checked ? "bg-emerald-400 w-full" : "bg-transparent w-0"
-              )}
-            />
-          </div>
+        <div className="px-3 pb-3">
+          <h3 className="text-sm sm:text-base font-semibold text-foreground truncate text-center leading-tight">
+            {label}
+          </h3>
         </div>
-      </CardContent>
+      </div>
     </Card>
   )
 }

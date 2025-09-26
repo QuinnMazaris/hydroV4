@@ -1,0 +1,25 @@
+version: '3.8'
+
+services:
+  hydro-app:
+    build: .
+    container_name: hydro-production
+    network_mode: host  # Use host network to access mosquitto on localhost
+    volumes:
+      - ./hydro.db:/app/hydro.db  # Persist database
+      - hydro-data:/app/data      # Additional data persistence
+    environment:
+      - NODE_ENV=production
+      - PORT=3001
+      - API_PORT=8001
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3001", "||", "exit", "1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+volumes:
+  hydro-data:
+    driver: local

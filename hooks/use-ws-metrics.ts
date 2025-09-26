@@ -38,7 +38,8 @@ export function useWsSensors(options?: {
   maxPointsPerSeries?: number
   fps?: number
 }) {
-  const defaultUrl = typeof window !== "undefined" ? `ws://${window.location.hostname}:8000/ws/sensors` : "ws://localhost:8000/ws/sensors"
+  const apiPort = process.env.NEXT_PUBLIC_API_PORT || "8000"
+  const defaultUrl = typeof window !== "undefined" ? `ws://${window.location.hostname}:${apiPort}/ws/sensors` : `ws://localhost:${apiPort}/ws/sensors`
   const { url, maxPointsPerSeries = 2000, fps = 4 } = options || {}
   const resolvedUrl = url || defaultUrl
 

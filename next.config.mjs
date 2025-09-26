@@ -9,11 +9,15 @@ const nextConfig = {
   images: {
     unoptimized: true,
   },
+  env: {
+    NEXT_PUBLIC_API_PORT: process.env.API_PORT || '8000',
+  },
   async rewrites() {
+    const apiPort = process.env.API_PORT || '8000'
     return [
       {
         source: '/api/:path*',
-        destination: 'http://localhost:8000/api/:path*',
+        destination: `http://localhost:${apiPort}/api/:path*`,
       },
     ]
   },
