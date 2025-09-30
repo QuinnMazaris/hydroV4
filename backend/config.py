@@ -37,6 +37,15 @@ class Settings(BaseSettings):
     # Approximate total points per metric over last 24h
     history_snapshot_target_points: int = 600
 
+    # Camera Configuration
+    camera_enabled: bool = True
+    camera_rtsp_url: str = "rtsp://admin:password@192.168.1.100:554/stream"
+    camera_device_key: str = "camera_1"
+    camera_capture_interval: int = 3600  # 1 hour in seconds
+    camera_frame_quality: int = 80  # WebP quality 0-100
+    camera_retention_hours: int = 720  # 30 days
+    camera_stream_enabled: bool = True
+
     # Logging
     log_level: str = "INFO"
 

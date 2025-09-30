@@ -11,6 +11,7 @@ import { Activity, ChevronRight } from "lucide-react"
 import { describeValue, resolveMetricMeta } from "@/lib/metrics"
 import { useWsSensors } from "@/hooks/use-ws-metrics"
 import { DeviceToggle } from "@/components/device-toggle"
+import { CameraFeed } from "@/components/camera-feed"
 
 interface MetricCardProps {
   title: string
@@ -123,6 +124,15 @@ export default function Dashboard() {
 
   const recentErrors = useMemo(() => errors.slice(-5).reverse(), [errors])
 
+  // Check if camera device exists
+  const hasCameraDevice = useMemo(() => {
+    return Object.keys(devices).some(key => key.startsWith('camera_'))
+  }, [devices])
+
+  const cameraDeviceKey = useMemo(() => {
+    return Object.keys(devices).find(key => key.startsWith('camera_')) || 'camera_1'
+  }, [devices])
+
   const handleActuatorToggle = async (deviceId: string, actuator: ActuatorInfo) => {
     console.log('🔄 Toggle clicked:', { deviceId, actuator })
     if (!actuator || !actuator.key) {
@@ -176,7 +186,7 @@ export default function Dashboard() {
           delete next[optimisticKey]
           return next
         })
-      }, 1000) // Give live data time to arrive via WebSocket
+      }, 3000) // Give live data time to arrive via WebSocket
     } catch (error) {
       console.error('Failed to send actuator command', error)
 
@@ -314,6 +324,13 @@ export default function Dashboard() {
         </header>
 
         <div className="container mx-auto flex-1 px-6 py-8">
+          {/* Camera Feed - Full width at top if available */}
+          {hasCameraDevice && (
+            <div className="mb-8">
+              <CameraFeed deviceKey={cameraDeviceKey} />
+            </div>
+          )}
+
           {/* Metrics Grid */}
           <div className="mb-8 grid grid-cols-1 gap-6 md:grid-cols-2 lg:grid-cols-3">
             {cards.map((c) => (

@@ -8,11 +8,18 @@ services:
     volumes:
       - ./hydro.db:/app/hydro.db  # Persist database
       - hydro-data:/app/data      # Additional data persistence
+      - camera-data:/app/data/camera  # Camera frames and stream
     environment:
       - NODE_ENV=production
       - PORT=3001
       - API_PORT=8001
       - MQTT_BROKER=127.0.0.1
+      # Camera configuration (override in .env if needed)
+      - CAMERA_ENABLED=true
+      - CAMERA_RTSP_URL=rtsp://Quinn:Mazaris@10.0.0.46:554/live/ch1  # SD stream for better Pi performance
+      - CAMERA_DEVICE_KEY=camera_1
+      - CAMERA_CAPTURE_INTERVAL=3600
+      - CAMERA_STREAM_ENABLED=true
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:3001", "||", "exit", "1"]
@@ -23,4 +30,6 @@ services:
 
 volumes:
   hydro-data:
+    driver: local
+  camera-data:
     driver: local

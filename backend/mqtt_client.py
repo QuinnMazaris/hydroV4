@@ -859,11 +859,12 @@ class MQTTClient:
             logger.error(f"Error handling discovery payload for {device_id}: {exc}")
 
     async def mark_inactive_devices(self):
-        """Mark devices as inactive if not seen for a while."""
+        """Mark MQTT devices as inactive if not seen for a while. Cameras are managed separately."""
         try:
             cutoff_time = datetime.utcnow() - timedelta(seconds=settings.sensor_discovery_timeout)
 
-            await mark_devices_inactive(cutoff_time)
+            # Only mark MQTT sensor devices as inactive (cameras have their own heartbeat)
+            await mark_devices_inactive(cutoff_time, device_type='mqtt_sensor')
 
             async with AsyncSessionLocal() as session:
                 result = await session.execute(

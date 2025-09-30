@@ -15,6 +15,7 @@ async def upsert_device(
     description: Optional[str] = None,
     metadata: Optional[str] = None,
     last_seen: Optional[datetime] = None,
+    device_type: str = 'mqtt_sensor',
 ) -> Device:
     """Insert a new device or refresh an existing one."""
     touch_time = last_seen or datetime.utcnow()
@@ -33,6 +34,8 @@ async def upsert_device(
                 device.description = description
             if metadata is not None and metadata != device.device_metadata:
                 device.device_metadata = metadata
+            if device_type and device.device_type != device_type:
+                device.device_type = device_type
         else:
             device = Device(
                 device_key=device_key,
@@ -41,6 +44,7 @@ async def upsert_device(
                 device_metadata=metadata,
                 last_seen=touch_time,
                 is_active=True,
+                device_type=device_type,
             )
             session.add(device)
 
@@ -168,13 +172,21 @@ async def get_metric_map(device_key: str) -> Dict[str, Metric]:
         return {metric.metric_key: metric for metric in metrics}
 
 
-async def mark_devices_inactive(cutoff: datetime) -> None:
+async def mark_devices_inactive(cutoff: datetime, device_type: Optional[str] = None) -> None:
+    """Mark devices as inactive if they haven't been seen since cutoff time.
+
+    Args:
+        cutoff: Timestamp before which devices are considered inactive
+        device_type: Optional device type filter. If provided, only affects that type.
+    """
     async with AsyncSessionLocal() as session:
-        await session.execute(
-            update(Device)
-            .where(Device.last_seen < cutoff)
-            .values(is_active=False)
-        )
+        query = update(Device).where(Device.last_seen < cutoff)
+
+        if device_type:
+            query = query.where(Device.device_type == device_type)
+
+        query = query.values(is_active=False)
+        await session.execute(query)
         await session.commit()
 
 

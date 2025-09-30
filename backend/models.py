@@ -30,6 +30,7 @@ class Device(Base):
     description = Column(Text, nullable=True)
     last_seen = Column(DateTime, default=datetime.utcnow, nullable=False)
     is_active = Column(Boolean, default=True, nullable=False)
+    device_type = Column(String(50), default='mqtt_sensor', nullable=False)  # 'mqtt_sensor', 'camera', etc
     device_metadata = Column(Text, nullable=True)  # JSON string for device-specific data
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
@@ -143,3 +144,48 @@ class ReadingResponse(ReadingCreate):
 class ActuatorControl(BaseModel):
     actuator_key: str  # The metric key (e.g. "relay1", "pump", "valve_a")
     state: str  # "on", "off", or other actuator-specific states
+
+
+class CameraFrame(Base):
+    """Store camera frame captures with metadata for LLM analysis"""
+    __tablename__ = "camera_frames"
+
+    id = Column(Integer, primary_key=True, index=True)
+    device_key = Column(String(100), nullable=False)
+    timestamp = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+    file_path = Column(String(500), nullable=False)
+    file_size = Column(Integer)
+    width = Column(Integer)
+    height = Column(Integer)
+
+    # LLM analysis results (nullable until processed)
+    analyzed_at = Column(DateTime, nullable=True)
+    analysis_model = Column(String(100), nullable=True)
+    detected_objects = Column(JSON, nullable=True)
+    plant_health_score = Column(Integer, nullable=True)
+    anomaly_detected = Column(Boolean, default=False)
+    notes = Column(Text, nullable=True)
+
+    __table_args__ = (
+        Index("ix_camera_frames_timestamp", "timestamp"),
+        Index("ix_camera_frames_analyzed", "analyzed_at"),
+    )
+
+
+class CameraFrameResponse(BaseModel):
+    id: int
+    device_key: str
+    timestamp: datetime
+    file_path: str
+    file_size: Optional[int]
+    width: Optional[int]
+    height: Optional[int]
+    analyzed_at: Optional[datetime]
+    analysis_model: Optional[str]
+    detected_objects: Optional[List[str]]
+    plant_health_score: Optional[int]
+    anomaly_detected: bool
+    notes: Optional[str]
+
+    class Config:
+        from_attributes = True

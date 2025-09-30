@@ -26,3 +26,10 @@ yarn-error.log*
 *.tsbuildinfo
 next-env.d.ts
 hydro.db
+
+# camera data
+/backend/data/camera/
+*.webp
+
+# camera configuration (contains credentials)
+/backend/cameras.json
