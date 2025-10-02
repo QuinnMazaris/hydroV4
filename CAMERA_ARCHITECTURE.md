@@ -1,192 +1,75 @@
 # Camera System Architecture
 
-## Overview
+This document summarises how cameras are configured, ingested, tracked, and rendered in Hydro V4 after the MediaMTX integration clean-up.
 
-The camera system is now **dynamic** - cameras are automatically discovered from MediaMTX configuration and displayed in the frontend without hardcoding.
-
-## Architecture Layers
-
-### 1. **MediaMTX (Manual Configuration)**
+## 1. Manual Configuration (Required)
 - **File**: `mediamtx.yml`
-- **Purpose**: RTSP source configuration and WebRTC streaming
-- **Manual Step**: Add camera paths here
+- **Purpose**: Declare RTSP sources for each camera path.
+- **Action**: Edit this file when adding or removing cameras.
+- **Example**:
+  ```yaml
+  paths:
+    camera_1:
+      source: rtsp://user:pass@10.0.0.46:555/live/ch1
+      rtspTransport: tcp
+      sourceOnDemand: no
+  ```
+  MediaMTX handles the RTSP ingest for every configured path.
 
-```yaml
-paths:
-  camera_1:
-    source: rtsp://USER:PASS@IP:PORT/path
-    rtspTransport: tcp
-    sourceOnDemand: no
+## 2. MediaMTX Container (Infrastructure)
+- **Service**: `mediamtx` (Docker, host network)
+- **Important ports**: 8889 (WebRTC/WHEP), 9997 (REST API), 8554 (RTSP ingest)
+- **Responsibilities**:
+  - Pull RTSP streams defined in `mediamtx.yml`
+  - Serve WebRTC sessions at `http://localhost:8889/{path}/whep`
+  - Report path status through the REST API at `http://localhost:9997/v3/paths/list`
 
-  camera_2:  # Add new cameras here
-    source: rtsp://USER:PASS@IP2:PORT/path
-    rtspTransport: tcp
-    sourceOnDemand: no
+## 3. Backend Database Sync (Auto-Discovery)
+- **Module**: `backend/services/camera_sync.py`
+  - Queries `http://localhost:9997/v3/paths/list`
+  - Upserts each camera path into the `devices` table with `device_type='camera'`
+  - Captures metadata (`ready`, `source_ready`, `tracks`, `readers`, `whep_url`, etc.)
+- **Maintenance Loop**: `backend/api.py` → `maintenance_loop()`
+  1. Runs `sync_cameras_to_db()` every 60 seconds
+  2. Marks cameras inactive after five minutes with no healthy sync via `mark_devices_inactive()`
+- **Persistence Helpers**: `backend/services/persistence.py`
+  - `upsert_device()` stores state and metadata
+  - `mark_devices_inactive()` expires stale devices
+- **Model**: `backend/models.py`
+  - `Device` rows hold `device_key`, `device_type='camera'`, `last_seen`, `is_active`, and JSON metadata
+
+## 4. Backend API Surface
+- **Active endpoint**: `GET /api/devices`
+  - Optional query params: `device_type`, `active_only`
+  - Returns `DeviceResponse` objects, including `device_type` and `device_metadata`
+- **Removed**: direct MediaMTX proxy endpoints (`/api/camera/list`, `/api/camera/health`) to ensure a single source of truth (the database)
+
+## 5. Frontend Display
+- **Hook**: `hooks/use-cameras.ts`
+  - Fetches `GET http://localhost:8001/api/devices?device_type=camera&active_only=false`
+  - Parses `device_metadata` JSON to recover WHEP URL, readiness, track list, etc.
+  - Exposes `cameras`, `isLoading`, and `error`
+- **Component**: `components/camera-feed.tsx`
+  - Establishes a WebRTC connection to `http://{hostname}:8889/{deviceKey}/whep`
+  - Shows live video, connection spinner, and retry UI when necessary
+- **Dashboard**: `app/page.tsx`
+  - Invokes `useCameras()` and renders a `<CameraFeed>` for each discovered camera
+  - Displays loading, error, and empty states when appropriate
+
+## Complete Data Flow
 ```
-
-### 2. **Backend API (Dynamic Discovery)**
-- **Endpoints**:
-  - `GET /api/camera/list` - Query MediaMTX API to list all camera paths
-  - `GET /api/camera/health` - Get real-time health status of all cameras
-- **Technology**: FastAPI + httpx to query MediaMTX API (port 9997)
-- **Auto-discovery**: Reads MediaMTX paths and exposes them to frontend
-
-### 3. **Frontend (Dynamic Rendering)**
-- **Hook**: `useCameras()` - Fetches camera list from backend API
-- **Component**: `<CameraFeed>` - WebRTC WHEP player
-- **Rendering**: `page.tsx` maps over cameras array and renders dynamically
-
-## Data Flow
-
+1. Edit mediamtx.yml → define camera path(s)
+2. MediaMTX container ingests RTSP and exposes WHEP + status API
+3. Backend maintenance loop syncs MediaMTX paths into the devices table
+4. Frontend requests /api/devices?device_type=camera
+5. Dashboard renders <CameraFeed> for each camera entry
 ```
-User adds camera to mediamtx.yml
-    ↓
-docker compose restart mediamtx
-    ↓
-MediaMTX ingests RTSP stream and creates path
-    ↓
-Backend queries MediaMTX API (/v3/paths/list)
-    ↓
-Frontend fetches from /api/camera/list
-    ↓
-useCameras() hook updates state
-    ↓
-page.tsx renders <CameraFeed> for each camera
-    ↓
-WebRTC connection via WHEP protocol
-```
+- **Heartbeat**: healthy cameras refresh `last_seen` every sync; offline cameras expire (is_active → False) after 5 minutes.
+- **Single Source of Truth**: the database now represents camera availability, keeping the frontend and other services consistent.
 
-## Integration with Hydro Device System
+## Operations Summary
+1. **Add/Remove Camera**: update `mediamtx.yml`, restart MediaMTX if needed.
+2. **Verify Sync**: `curl http://localhost:8001/api/devices?device_type=camera&active_only=false`
+3. **View in UI**: reload the dashboard; offline cameras show the retry state from `<CameraFeed>`.
 
-### Current State
-- **Cameras**: Separate system via MediaMTX
-- **Devices**: MQTT-based sensors/actuators in database
-
-### Integration Options
-
-#### Option 1: **Separate Systems** (Current - Recommended)
-**Pros:**
-- Clean separation of concerns
-- Cameras don't pollute device database
-- Different lifecycle (cameras are infrastructure, devices are dynamic)
-- MediaMTX handles all camera logic
-
-**Cons:**
-- Two separate systems to manage
-
-#### Option 2: **Register Cameras as Devices**
-Auto-register cameras in the database:
-```python
-# On startup or periodic sync
-for camera in mediamtx_cameras:
-    await upsert_device(
-        device_key=camera.path,
-        name=camera.name,
-        device_type='camera',
-        last_seen=datetime.utcnow()
-    )
-```
-
-**Pros:**
-- Unified device view in dashboard
-- Cameras appear in "Device Overview"
-- Can track camera metrics/uptime
-
-**Cons:**
-- Cameras aren't really MQTT devices
-- Adds complexity
-- Database becomes source of truth for infrastructure
-
-#### Option 3: **Hybrid Approach**
-- Keep cameras in MediaMTX
-- Show them in UI alongside devices
-- Don't store in database
-- Use device_key naming convention to group them
-
-**Recommended:** **Option 1** - Keep systems separate. Cameras are infrastructure (like MediaMTX), devices are application-level (like sensors).
-
-## Adding New Cameras
-
-### Steps:
-1. **Update mediamtx.yml**:
-   ```yaml
-   paths:
-     new_camera:
-       source: rtsp://USER:PASS@IP:PORT/path
-       rtspTransport: tcp
-       sourceOnDemand: no
-   ```
-
-2. **Restart MediaMTX**:
-   ```bash
-   docker compose restart mediamtx
-   ```
-
-3. **Automatic from here**:
-   - Backend discovers new camera via API
-   - Frontend auto-renders new feed
-   - No code changes needed!
-
-## Future Enhancements
-
-1. **Camera Controls**:
-   - PTZ controls via MediaMTX
-   - Snapshot capture endpoint
-   - Recording controls
-
-2. **Analytics Integration**:
-   - Send snapshots to LLM for plant health analysis
-   - Store analysis results in database
-   - Display insights in UI
-
-3. **Multi-view Layouts**:
-   - Grid view for multiple cameras
-   - Fullscreen toggle
-   - Picture-in-picture
-
-4. **Camera Settings UI**:
-   - Add cameras via UI (updates mediamtx.yml)
-   - Configure quality/bitrate
-   - Enable/disable cameras
-
-## API Reference
-
-### GET /api/camera/list
-Returns list of cameras from MediaMTX.
-
-**Response:**
-```json
-{
-  "cameras": [
-    {
-      "device_key": "camera_1",
-      "name": "camera_1",
-      "ready": true,
-      "source_ready": true,
-      "tracks": ["H264", "MPEG-4 Audio"],
-      "readers": 1,
-      "whep_url": "http://localhost:8889/camera_1/whep"
-    }
-  ],
-  "count": 1
-}
-```
-
-### GET /api/camera/health
-Returns health status of all cameras.
-
-**Response:**
-```json
-{
-  "cameras": [
-    {
-      "device_key": "camera_1",
-      "online": true,
-      "ready": true,
-      "source_ready": true,
-      "bytes_sent": 1048576,
-      "readers": 1
-    }
-  ]
-}
-```
+This unified approach keeps MediaMTX responsible for streaming while the Hydro backend/database manages presence and health.

@@ -48,7 +48,9 @@ async def sync_cameras_to_db() -> Dict[str, Any]:
             for item in items:
                 try:
                     # Extract camera path name
-                    path_name = item.get("name") or item.get("path", "")
+                    raw_path = item.get("path") or item.get("name") or ""
+                    display_name = item.get("name") or raw_path
+                    path_name = raw_path
 
                     # Skip system paths (starting with underscore)
                     if not path_name or path_name.startswith("_"):
@@ -56,11 +58,13 @@ async def sync_cameras_to_db() -> Dict[str, Any]:
 
                     # Determine if camera is healthy (MediaMTX v3 uses "ready" field)
                     is_ready = item.get("ready", False)
+                    source_ready = item.get("sourceReady", False)
                     is_healthy = is_ready
 
                     # Build camera metadata
                     camera_metadata = {
                         "ready": is_ready,
+                        "source_ready": source_ready,
                         "tracks": item.get("tracks", []),
                         "readers": item.get("readers", 0),
                         "bytes_sent": item.get("bytesSent", 0),
@@ -75,8 +79,8 @@ async def sync_cameras_to_db() -> Dict[str, Any]:
                     # Upsert device record
                     await upsert_device(
                         device_key=path_name,
-                        name=path_name,  # Use path name as display name
-                        description=f"Camera stream via MediaMTX",
+                        name=display_name or path_name,
+                        description="Camera stream via MediaMTX",
                         metadata=json.dumps(camera_metadata),
                         last_seen=last_seen,
                         device_type='camera',

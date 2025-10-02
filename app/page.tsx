@@ -84,7 +84,7 @@ const normalizeActuatorState = (value: any): 'on' | 'off' | 'unknown' => {
 
 export default function Dashboard() {
   const { sensorsByDevice, actuatorsByDevice, devices, status, errors } = useWsSensors()
-  const { cameras, isLoading: camerasLoading } = useCameras()
+  const { cameras, isLoading: camerasLoading, error: cameraError } = useCameras()
   const timeWindowMs = 24 * 60 * 60 * 1000
 
   const formatRelativeTime = (timestamp?: number | null) => {
@@ -413,13 +413,34 @@ export default function Dashboard() {
 
         <div className="container mx-auto flex-1 px-6 py-8">
           {/* Camera Feeds - Dynamically loaded from MediaMTX */}
-          {!camerasLoading && cameras.length > 0 && (
-            <div className="mb-8 space-y-6">
-              {cameras.map((camera) => (
-                <CameraFeed key={camera.device_key} deviceKey={camera.device_key} />
-              ))}
-            </div>
-          )}
+          <div className="mb-8 space-y-4">
+            {cameraError && (
+              <div className="rounded-lg border border-destructive/40 bg-destructive/10 px-4 py-3 text-sm text-destructive">
+                {cameraError}
+              </div>
+            )}
+            {camerasLoading ? (
+              <Card className="border-white/10 bg-black/40">
+                <CardContent className="py-6">
+                  <p className="text-sm text-muted-foreground">Loading camera feeds…</p>
+                </CardContent>
+              </Card>
+            ) : cameras.length > 0 ? (
+              <div className="space-y-6">
+                {cameras.map((camera) => (
+                  <CameraFeed key={camera.device_key} deviceKey={camera.device_key} />
+                ))}
+              </div>
+            ) : (
+              <Card className="border-white/10 bg-black/40">
+                <CardContent className="py-6">
+                  <p className="text-sm text-muted-foreground">
+                    No cameras discovered. Confirm MediaMTX paths and camera sync are configured.
+                  </p>
+                </CardContent>
+              </Card>
+            )}
+          </div>
 
           {/* Metrics Grid */}
           <div className="mb-8 grid grid-cols-1 gap-6 md:grid-cols-2 lg:grid-cols-3">

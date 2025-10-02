@@ -10,10 +10,10 @@ const nextConfig = {
     unoptimized: true,
   },
   env: {
-    NEXT_PUBLIC_API_PORT: process.env.API_PORT || '8000',
+    NEXT_PUBLIC_API_PORT: process.env.API_PORT || '8001',
   },
   async rewrites() {
-    const apiPort = process.env.API_PORT || '8000'
+    const apiPort = process.env.API_PORT || '8001'
     return [
       {
         source: '/api/:path*',

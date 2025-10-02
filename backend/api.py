@@ -342,16 +342,18 @@ async def build_initial_snapshot():
 @app.get("/api/devices", response_model=List[DeviceResponse])
 async def get_devices(
     active_only: bool = True,
-    db: AsyncSession = Depends(get_db)
+    device_type: Optional[str] = None,
+    db: AsyncSession = Depends(get_db),
 ):
-    """Get all devices from the system - includes both active and inactive devices for administration purposes"""
+    """Return devices, optionally filtered by activity status or type."""
     query = select(Device)
+    if device_type:
+        query = query.where(Device.device_type == device_type)
     if active_only:
         query = query.where(Device.is_active == True)
 
     result = await db.execute(query.order_by(Device.created_at))
-    devices = result.scalars().all()
-    return devices
+    return result.scalars().all()
 
 @app.get("/api/devices/{device_id}", response_model=DeviceResponse)
 async def get_device(device_id: str, db: AsyncSession = Depends(get_db)):
@@ -756,97 +758,6 @@ async def health_check():
         "mqtt_connected": mqtt_client.is_connected,
         "timestamp": datetime.utcnow()
     }
-
-
-# Camera endpoints
-import httpx
-
-MEDIAMTX_API_URL = "http://localhost:9997"
-
-@app.get("/api/camera/list")
-async def list_cameras():
-    """Get list of available cameras from MediaMTX"""
-    try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            # Note: MediaMTX API requires basic auth by default, but we configured it without auth
-            response = await client.get(f"{MEDIAMTX_API_URL}/v3/paths/list")
-
-            if response.status_code == 404:
-                # Try v2 API
-                response = await client.get(f"{MEDIAMTX_API_URL}/v2/paths/list")
-
-            if response.status_code != 200:
-                raise HTTPException(status_code=502, detail="MediaMTX API unavailable")
-
-            data = response.json()
-
-            # Extract camera paths (filter out system paths if needed)
-            cameras = []
-            items = data.get("items", []) if isinstance(data, dict) else data
-
-            for item in items:
-                path_name = item.get("name") or item.get("path", "")
-
-                # Skip if not a camera path (you can adjust this filter)
-                if not path_name or path_name.startswith("_"):
-                    continue
-
-                cameras.append({
-                    "device_key": path_name,
-                    "name": item.get("name", path_name),
-                    "ready": item.get("ready", False),
-                    "tracks": item.get("tracks", []),
-                    "readers": item.get("readers", 0),
-                    "whep_url": f"http://localhost:8889/{path_name}/whep"
-                })
-
-            return {
-                "cameras": cameras,
-                "count": len(cameras)
-            }
-
-    except httpx.RequestError as e:
-        raise HTTPException(status_code=502, detail=f"Failed to connect to MediaMTX: {str(e)}")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error fetching cameras: {str(e)}")
-
-
-@app.get("/api/camera/health")
-async def camera_health():
-    """Get health/status of all cameras"""
-    try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            response = await client.get(f"{MEDIAMTX_API_URL}/v3/paths/list")
-
-            if response.status_code == 404:
-                response = await client.get(f"{MEDIAMTX_API_URL}/v2/paths/list")
-
-            if response.status_code != 200:
-                raise HTTPException(status_code=502, detail="MediaMTX API unavailable")
-
-            data = response.json()
-            items = data.get("items", []) if isinstance(data, dict) else data
-
-            cameras = []
-            for item in items:
-                path_name = item.get("name") or item.get("path", "")
-                if not path_name or path_name.startswith("_"):
-                    continue
-
-                cameras.append({
-                    "device_key": path_name,
-                    "online": item.get("ready", False),
-                    "ready": item.get("ready", False),
-                    "bytes_sent": item.get("bytesSent", 0),
-                    "readers": item.get("readers", 0)
-                })
-
-            return {"cameras": cameras}
-
-    except httpx.RequestError as e:
-        raise HTTPException(status_code=502, detail=f"Failed to connect to MediaMTX: {str(e)}")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error checking camera health: {str(e)}")
 
 
 if __name__ == "__main__":

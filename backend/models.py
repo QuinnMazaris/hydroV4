@@ -92,6 +92,7 @@ class DeviceBase(BaseModel):
     name: Optional[str] = None
     description: Optional[str] = None
     device_metadata: Optional[str] = None
+    device_type: str = Field(default='mqtt_sensor')
 
 
 class DeviceCreate(DeviceBase):
