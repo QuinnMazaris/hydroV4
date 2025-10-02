@@ -1,6 +1,5 @@
 "use client"
 
-import { Loader2 } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { Card } from "@/components/ui/card"
 
@@ -8,14 +7,13 @@ interface DeviceToggleProps {
   id: string
   label: string
   checked: boolean
-  loading?: boolean
   disabled?: boolean
   onToggle?: () => void
 }
 
-export function DeviceToggle({ id, label, checked, loading = false, disabled = false, onToggle }: DeviceToggleProps) {
+export function DeviceToggle({ id, label, checked, disabled = false, onToggle }: DeviceToggleProps) {
   const handleClick = () => {
-    if (disabled || loading) return
+    if (disabled) return
     onToggle?.()
   }
 
@@ -59,9 +57,9 @@ export function DeviceToggle({ id, label, checked, loading = false, disabled = f
   return (
     <Card
       className={cn(
-        "w-full aspect-square p-0 overflow-hidden cursor-pointer transition-all duration-300 border-white/10 backdrop-blur-xl shadow-xl",
-        "hover:scale-[1.02] hover:shadow-2xl",
-        loading && "cursor-wait opacity-70",
+        "w-full aspect-square p-0 overflow-hidden cursor-pointer border-white/10 backdrop-blur-xl shadow-xl",
+        "transition-[transform,background-color,border-color] duration-150 ease-out will-change-transform",
+        "hover:scale-[1.02]",
         disabled && "cursor-not-allowed opacity-50",
         checked
           ? "bg-emerald-950/30 border-emerald-400/30"
@@ -75,11 +73,7 @@ export function DeviceToggle({ id, label, checked, loading = false, disabled = f
       <div className="flex h-full flex-col">
         <div className="flex-1 min-h-0 p-3 flex items-center justify-center">
           <div className="w-full h-full flex items-center justify-center">
-            {loading ? (
-              <Loader2 className="w-1/2 h-1/2 animate-spin text-emerald-300" />
-            ) : (
-              <PlantAnimation isActive={checked} id={id} />
-            )}
+            <PlantAnimation isActive={checked} id={id} />
           </div>
         </div>
         <div className="px-3 pb-3">

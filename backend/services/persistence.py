@@ -4,9 +4,11 @@ from datetime import datetime
 from typing import Dict, Optional, Sequence
 
 from sqlalchemy import delete, select, update
+from loguru import logger
 
 from ..database import AsyncSessionLocal
 from ..models import Device, JsonValue, Metric, Reading
+from ..events import event_broker
 
 
 async def upsert_device(
@@ -50,6 +52,18 @@ async def upsert_device(
 
         await session.commit()
         await session.refresh(device)
+
+        # Publish device event to notify WebSocket clients of the update
+        try:
+            await event_broker.publish({
+                'type': 'device',
+                'device_id': device.device_key,
+                'is_active': device.is_active,
+                'last_seen': int(device.last_seen.timestamp() * 1000) if device.last_seen else None,
+            })
+        except Exception as e:
+            logger.debug(f"Failed to publish device event for {device.device_key}: {e}")
+
         return device
 
 

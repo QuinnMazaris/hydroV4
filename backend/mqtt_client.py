@@ -40,6 +40,10 @@ class MQTTClient:
         self.values_cache: Dict[str, Dict[str, Any]] = {}
         # Track which devices have completed discovery
         self.discovery_completed: Set[str] = set()
+        # Actuator publish rate limiting
+        self.actuator_rate_limit = settings.actuator_publish_rate_hz
+        self.actuator_buckets: Dict[str, Dict[str, Any]] = {}
+        self._actuator_publish_lock = asyncio.Lock()
 
     async def _ensure_device_record(
         self,
@@ -924,13 +928,80 @@ class MQTTClient:
                 if suffix.isdigit():
                     payload["relay"] = int(suffix)
 
+            # Publish using the rate-limited topic aggregator
             for topic in sorted(resolved_topics):
                 normalized_topic = topic.strip('/')
-                self.client.publish(normalized_topic, json.dumps(payload), qos=settings.mqtt_qos)
-                logger.info(f"Published actuator control command to {normalized_topic}: {payload}")
+                await self._publish_rate_limited(normalized_topic, payload)
 
         except Exception as exc:
             logger.error(f"Error publishing actuator control: {exc}")
+            raise
+
+    async def _publish_rate_limited(self, topic: str, payload: Dict[str, Any]):
+        """Aggregate actuator payloads per topic and publish at a limited rate."""
+        bucket_key = topic
+        now = datetime.utcnow()
+        async with self._actuator_publish_lock:
+            bucket = self.actuator_buckets.get(bucket_key)
+            if not bucket:
+                bucket = {
+                    'last_sent': None,
+                    'accumulator': {},
+                }
+                self.actuator_buckets[bucket_key] = bucket
+
+            # Merge into accumulator (one entry per actuator key)
+            actuator = payload.get('actuator')
+            if actuator:
+                bucket['accumulator'][actuator] = payload
+            else:
+                # Fallback: store as unique key
+                bucket['accumulator'][json.dumps(payload, sort_keys=True)] = payload
+
+            # Determine if we can send immediately
+            min_interval = 1.0 / max(1.0, float(self.actuator_rate_limit))
+            last_sent = bucket['last_sent']
+            delta = (now - last_sent).total_seconds() if last_sent else None
+
+            if last_sent is None or (delta is not None and delta >= min_interval):
+                await self._flush_actuator_bucket(topic, bucket, now)
+            else:
+                # Schedule future flush
+                delay = max(0.0, min_interval - delta)
+                asyncio.create_task(self._delayed_flush(topic, delay))
+
+    async def _delayed_flush(self, topic: str, delay: float):
+        await asyncio.sleep(delay)
+        async with self._actuator_publish_lock:
+            bucket = self.actuator_buckets.get(topic)
+            if not bucket or not bucket['accumulator']:
+                return
+            await self._flush_actuator_bucket(topic, bucket, datetime.utcnow())
+
+    async def _flush_actuator_bucket(self, topic: str, bucket: Dict[str, Any], timestamp: datetime):
+        accumulator = bucket['accumulator']
+        if not accumulator:
+            return
+
+        payloads = list(accumulator.values())
+        bucket['accumulator'] = {}
+        bucket['last_sent'] = timestamp
+
+        if len(payloads) == 1:
+            payload_to_send = payloads[0]
+        else:
+            payload_to_send = {
+                'device_id': payloads[0].get('device_id'),
+                'batched': True,
+                'commands': payloads,
+            }
+
+        try:
+            message = json.dumps(payload_to_send)
+            self.client.publish(topic, message, qos=settings.mqtt_qos)
+            logger.info(f"Published actuator command to {topic}: {payload_to_send}")
+        except Exception as exc:
+            logger.error(f"Failed to publish actuator command on topic {topic}: {exc}")
             raise
 
     async def disconnect(self):

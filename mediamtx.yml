@@ -1,0 +1,21 @@
+# MediaMTX Configuration for Hydroponic Camera System
+
+# API for health checks
+api: yes
+apiAddress: :9997
+
+# WebRTC configuration
+webRTCAddress: :8889
+webRTCICEServers2:
+  - url: stun:stun.l.google.com:19302
+
+# RTSP server for internal snapshot access
+rtspAddress: :8554
+rtspTransports: [tcp]
+
+# Camera paths
+paths:
+  camera_1:
+    source: rtsp://Quinn:Mazaris@10.0.0.46:555/live/ch1
+    rtspTransport: tcp
+    sourceOnDemand: no

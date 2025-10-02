@@ -40,7 +40,7 @@ export function useWsSensors(options?: {
 }) {
   const apiPort = process.env.NEXT_PUBLIC_API_PORT || "8000"
   const defaultUrl = typeof window !== "undefined" ? `ws://${window.location.hostname}:${apiPort}/ws/sensors` : `ws://localhost:${apiPort}/ws/sensors`
-  const { url, maxPointsPerSeries = 2000, fps = 4 } = options || {}
+  const { url, maxPointsPerSeries = 2000, fps = 10 } = options || {}
   const resolvedUrl = url || defaultUrl
 
   const sensorBuffersRef = useRef<Record<string, Record<string, MetricPoint[]>>>({})

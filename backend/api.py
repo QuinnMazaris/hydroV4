@@ -13,10 +13,9 @@ from .config import settings
 from .database import AsyncSessionLocal, get_db, init_db
 from .events import event_broker
 from .metrics import build_metric_meta
-from .models import ActuatorControl, Device, DeviceResponse, Metric, Reading, CameraFrame, CameraFrameResponse
+from .models import ActuatorControl, Device, DeviceResponse, Metric, Reading
 from .mqtt_client import mqtt_client
 from .services.persistence import delete_old_readings
-from .services.camera_manager import camera_manager
 
 app = FastAPI(title="Hydroponic System API", version="1.0.0")
 
@@ -41,9 +40,6 @@ async def startup_event():
 
     app.state.maintenance_task = asyncio.create_task(maintenance_loop())
 
-    # Start all cameras from configuration
-    await camera_manager.start_all()
-
 
 @app.on_event("shutdown")
 async def shutdown_event():
@@ -54,9 +50,6 @@ async def shutdown_event():
         with suppress(asyncio.CancelledError):
             await task
         app.state.maintenance_task = None
-
-    # Stop all cameras
-    await camera_manager.stop_all()
 
     await mqtt_client.disconnect()
 
@@ -756,186 +749,6 @@ async def health_check():
         "mqtt_connected": mqtt_client.is_connected,
         "timestamp": datetime.utcnow()
     }
-
-
-# Camera endpoints
-from fastapi.responses import FileResponse
-from fastapi.staticfiles import StaticFiles
-from pathlib import Path as PathLib
-
-# Serve HLS stream files dynamically for all cameras
-app.mount("/api/camera/stream", StaticFiles(directory="/app/data/camera/hls"), name="camera_stream")
-
-
-@app.get("/api/camera/status")
-async def get_camera_status(device_key: Optional[str] = None):
-    """Get camera streaming and capture status for all or specific camera"""
-    cameras = camera_manager.cameras
-
-    if not cameras:
-        return {"enabled": False, "cameras": []}
-
-    # If specific camera requested
-    if device_key:
-        camera = camera_manager.get_camera(device_key)
-        if not camera:
-            raise HTTPException(status_code=404, detail=f"Camera {device_key} not found")
-
-        # Get latest frame
-        latest_frame = None
-        async with AsyncSessionLocal() as db:
-            result = await db.execute(
-                select(CameraFrame)
-                .where(CameraFrame.device_key == device_key)
-                .order_by(CameraFrame.timestamp.desc())
-                .limit(1)
-            )
-            frame = result.scalar_one_or_none()
-            if frame:
-                latest_frame = {
-                    "id": frame.id,
-                    "timestamp": frame.timestamp.isoformat(),
-                    "file_size": frame.file_size
-                }
-
-        return {
-            "enabled": True,
-            "device_key": device_key,
-            "name": camera.config.name,
-            "stream_active": camera.stream.is_streaming(),
-            "capture_interval": camera.config.capture_interval,
-            "latest_frame": latest_frame
-        }
-
-    # Return status for all cameras
-    camera_statuses = []
-    for cam in cameras.values():
-        async with AsyncSessionLocal() as db:
-            result = await db.execute(
-                select(CameraFrame)
-                .where(CameraFrame.device_key == cam.config.device_key)
-                .order_by(CameraFrame.timestamp.desc())
-                .limit(1)
-            )
-            frame = result.scalar_one_or_none()
-            latest_frame = {
-                "id": frame.id,
-                "timestamp": frame.timestamp.isoformat(),
-                "file_size": frame.file_size
-            } if frame else None
-
-        camera_statuses.append({
-            "device_key": cam.config.device_key,
-            "name": cam.config.name,
-            "stream_active": cam.stream.is_streaming(),
-            "capture_interval": cam.config.capture_interval,
-            "latest_frame": latest_frame
-        })
-
-    return {
-        "enabled": True,
-        "count": len(cameras),
-        "cameras": camera_statuses
-    }
-
-
-@app.get("/api/camera/frames", response_model=List[CameraFrameResponse])
-async def get_camera_frames(
-    device_key: Optional[str] = None,
-    since: Optional[datetime] = None,
-    limit: int = 100,
-    analyzed_only: bool = False,
-    db: AsyncSession = Depends(get_db)
-):
-    """Get camera frames with optional filtering"""
-    query = select(CameraFrame)
-
-    if device_key:
-        query = query.where(CameraFrame.device_key == device_key)
-
-    if since:
-        query = query.where(CameraFrame.timestamp >= since)
-    if analyzed_only:
-        query = query.where(CameraFrame.analyzed_at.isnot(None))
-
-    query = query.order_by(CameraFrame.timestamp.desc()).limit(limit)
-
-    result = await db.execute(query)
-    frames = result.scalars().all()
-
-    return frames
-
-
-@app.get("/api/camera/frames/{frame_id}")
-async def get_camera_frame_info(frame_id: int, db: AsyncSession = Depends(get_db)):
-    """Get info about a specific frame"""
-    result = await db.execute(
-        select(CameraFrame).where(CameraFrame.id == frame_id)
-    )
-    frame = result.scalar_one_or_none()
-
-    if not frame:
-        raise HTTPException(status_code=404, detail="Frame not found")
-
-    return {
-        "id": frame.id,
-        "device_key": frame.device_key,
-        "timestamp": frame.timestamp.isoformat(),
-        "url": f"/api/camera/image/{frame.id}",
-        "file_size": frame.file_size,
-        "width": frame.width,
-        "height": frame.height,
-        "analyzed": frame.analyzed_at is not None,
-        "analysis": {
-            "analyzed_at": frame.analyzed_at.isoformat() if frame.analyzed_at else None,
-            "model": frame.analysis_model,
-            "objects": frame.detected_objects,
-            "health_score": frame.plant_health_score,
-            "anomaly_detected": frame.anomaly_detected,
-            "notes": frame.notes
-        } if frame.analyzed_at else None
-    }
-
-
-@app.get("/api/camera/image/{frame_id}")
-async def get_camera_image(frame_id: int, db: AsyncSession = Depends(get_db)):
-    """Serve individual frame image"""
-    result = await db.execute(
-        select(CameraFrame).where(CameraFrame.id == frame_id)
-    )
-    frame = result.scalar_one_or_none()
-
-    if not frame:
-        raise HTTPException(status_code=404, detail="Frame not found")
-
-    file_path = PathLib("/app/data") / frame.file_path
-
-    if not file_path.exists():
-        raise HTTPException(status_code=404, detail="Frame file not found")
-
-    return FileResponse(str(file_path), media_type="image/webp")
-
-
-@app.get("/api/camera/latest")
-async def get_latest_frame(device_key: Optional[str] = None, db: AsyncSession = Depends(get_db)):
-    """Get the latest frame image for a camera"""
-    query = select(CameraFrame).order_by(CameraFrame.timestamp.desc()).limit(1)
-
-    if device_key:
-        query = select(CameraFrame).where(CameraFrame.device_key == device_key).order_by(CameraFrame.timestamp.desc()).limit(1)
-
-    result = await db.execute(query)
-    frame = result.scalar_one_or_none()
-
-    if not frame:
-        raise HTTPException(status_code=404, detail="No frames captured yet")
-
-    file_path = PathLib("/app/data") / frame.file_path
-
-    if not file_path.exists():
-        raise HTTPException(status_code=404, detail="Frame file not found")
-
-    return FileResponse(str(file_path), media_type="image/webp")
 
 
 if __name__ == "__main__":

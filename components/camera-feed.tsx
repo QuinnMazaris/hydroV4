@@ -1,11 +1,10 @@
 "use client"
 
 import { useEffect, useRef, useState } from "react"
-import Hls from "hls.js"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
-import { Camera, Activity } from "lucide-react"
+import { Camera, Activity, PlayCircle } from "lucide-react"
 
 interface CameraFeedProps {
   deviceKey?: string
@@ -14,83 +13,105 @@ interface CameraFeedProps {
 
 export function CameraFeed({ deviceKey = "camera_1", showControls = true }: CameraFeedProps) {
   const videoRef = useRef<HTMLVideoElement>(null)
-  const hlsRef = useRef<Hls | null>(null)
-  const [isLoading, setIsLoading] = useState(true)
-  const [error, setError] = useState<string | null>(null)
+  const pcRef = useRef<RTCPeerConnection | null>(null)
+  const [isConnecting, setIsConnecting] = useState(false)
   const [isLive, setIsLive] = useState(false)
+  const [error, setError] = useState<string | null>(null)
 
-  useEffect(() => {
-    const video = videoRef.current
-    if (!video) return
+  const connectWebRTC = async () => {
+    try {
+      setIsConnecting(true)
+      setError(null)
 
-    const apiPort = process.env.NEXT_PUBLIC_API_PORT || "8000"
-    const streamUrl = `http://${window.location.hostname}:${apiPort}/api/camera/stream/stream.m3u8`
-
-    if (Hls.isSupported()) {
-      const hls = new Hls({
-        enableWorker: true,
-        lowLatencyMode: true,
-        backBufferLength: 0,  // Disable back buffer for live streaming
-        maxBufferLength: 2,   // Keep only 2 seconds of buffer
-        maxMaxBufferLength: 3,
-        liveSyncDurationCount: 1,
-        liveMaxLatencyDurationCount: 2,
-      })
-
-      hlsRef.current = hls
-
-      hls.loadSource(streamUrl)
-      hls.attachMedia(video)
-
-      hls.on(Hls.Events.MANIFEST_PARSED, () => {
-        setIsLoading(false)
-        setIsLive(true)
-        video.play().catch((e) => {
-          console.error("Failed to autoplay:", e)
-        })
-      })
-
-      hls.on(Hls.Events.ERROR, (event, data) => {
-        if (data.fatal) {
-          setError("Stream connection failed")
-          setIsLive(false)
-
-          switch (data.type) {
-            case Hls.ErrorTypes.NETWORK_ERROR:
-              console.error("Network error, trying to recover...")
-              hls.startLoad()
-              break
-            case Hls.ErrorTypes.MEDIA_ERROR:
-              console.error("Media error, trying to recover...")
-              hls.recoverMediaError()
-              break
-            default:
-              console.error("Fatal error, cannot recover")
-              hls.destroy()
-              break
-          }
-        }
-      })
-
-      return () => {
-        hls.destroy()
-        hlsRef.current = null
+      // Clean up existing connection
+      if (pcRef.current) {
+        pcRef.current.close()
+        pcRef.current = null
       }
-    } else if (video.canPlayType("application/vnd.apple.mpegurl")) {
-      // Native HLS support (Safari)
-      video.src = streamUrl
-      video.addEventListener("loadedmetadata", () => {
-        setIsLoading(false)
-        setIsLive(true)
-        video.play()
+
+      // Create RTCPeerConnection with STUN server
+      const pc = new RTCPeerConnection({
+        iceServers: [
+          { urls: 'stun:stun.l.google.com:19302' }
+        ]
       })
 
-      video.addEventListener("error", () => {
-        setError("Stream playback failed")
-        setIsLive(false)
+      pcRef.current = pc
+
+      // Handle incoming tracks (video/audio)
+      pc.ontrack = (event) => {
+        if (videoRef.current && event.streams[0]) {
+          videoRef.current.srcObject = event.streams[0]
+          setIsLive(true)
+          setIsConnecting(false)
+        }
+      }
+
+      // Monitor connection state
+      pc.onconnectionstatechange = () => {
+        console.log('WebRTC connection state:', pc.connectionState)
+        if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') {
+          setError('Connection lost')
+          setIsLive(false)
+        }
+      }
+
+      // Add transceivers for receiving video and audio
+      pc.addTransceiver('video', { direction: 'recvonly' })
+      pc.addTransceiver('audio', { direction: 'recvonly' })
+
+      // Create offer
+      const offer = await pc.createOffer()
+      await pc.setLocalDescription(offer)
+
+      // Send offer to MediaMTX WHEP endpoint
+      const whepUrl = `http://${window.location.hostname}:8889/${deviceKey}/whep`
+
+      const response = await fetch(whepUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/sdp'
+        },
+        body: offer.sdp
       })
-    } else {
-      setError("HLS not supported in this browser")
+
+      if (!response.ok) {
+        throw new Error(`WHEP request failed: ${response.status} ${response.statusText}`)
+      }
+
+      // Set remote description from answer
+      const answerSdp = await response.text()
+      await pc.setRemoteDescription({
+        type: 'answer',
+        sdp: answerSdp
+      })
+
+      console.log('WebRTC connection established')
+    } catch (err) {
+      console.error('WebRTC connection failed:', err)
+      setError(err instanceof Error ? err.message : 'Failed to connect to camera')
+      setIsConnecting(false)
+      setIsLive(false)
+    }
+  }
+
+  const disconnect = () => {
+    if (pcRef.current) {
+      pcRef.current.close()
+      pcRef.current = null
+    }
+    if (videoRef.current) {
+      videoRef.current.srcObject = null
+    }
+    setIsLive(false)
+  }
+
+  // Auto-connect on mount
+  useEffect(() => {
+    connectWebRTC()
+
+    return () => {
+      disconnect()
     }
   }, [deviceKey])
 
@@ -99,12 +120,24 @@ export function CameraFeed({ deviceKey = "camera_1", showControls = true }: Came
       <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-3">
         <div className="flex items-center gap-2">
           <Camera className="h-5 w-5 text-muted-foreground" />
-          <CardTitle className="text-base font-medium text-foreground">Camera Feed</CardTitle>
+          <CardTitle className="text-base font-medium text-foreground">Live Camera Feed</CardTitle>
         </div>
+        {isLive && (
+          <Badge variant="default" className="gap-1">
+            <Activity className="h-3 w-3 animate-pulse" />
+            Live
+          </Badge>
+        )}
+        {isConnecting && (
+          <Badge variant="secondary" className="gap-1">
+            <Activity className="h-3 w-3 animate-spin" />
+            Connecting
+          </Badge>
+        )}
       </CardHeader>
       <CardContent className="p-0">
         <div className="relative aspect-video bg-black">
-          {isLoading && (
+          {isConnecting && (
             <div className="absolute inset-0 flex items-center justify-center">
               <div className="flex flex-col items-center gap-3">
                 <Activity className="h-8 w-8 animate-spin text-primary" />
@@ -121,8 +154,9 @@ export function CameraFeed({ deviceKey = "camera_1", showControls = true }: Came
                 <Button
                   size="sm"
                   variant="outline"
-                  onClick={() => window.location.reload()}
+                  onClick={connectWebRTC}
                 >
+                  <PlayCircle className="h-4 w-4 mr-2" />
                   Retry
                 </Button>
               </div>
@@ -133,11 +167,29 @@ export function CameraFeed({ deviceKey = "camera_1", showControls = true }: Came
             ref={videoRef}
             className="w-full h-full object-contain"
             autoPlay
-            muted
             playsInline
+            muted
           />
         </div>
 
+        {showControls && isLive && (
+          <div className="p-3 border-t border-white/10 flex gap-2">
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={connectWebRTC}
+            >
+              Reconnect
+            </Button>
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={disconnect}
+            >
+              Disconnect
+            </Button>
+          </div>
+        )}
       </CardContent>
     </Card>
   )

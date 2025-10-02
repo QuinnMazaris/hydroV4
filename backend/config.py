@@ -10,6 +10,7 @@ class Settings(BaseSettings):
     mqtt_password: Optional[str] = None
     mqtt_keepalive: int = 60
     mqtt_qos: int = 1
+    actuator_publish_rate_hz: float = 15.0
 
     # Topic Configuration
     mqtt_base_topic: str = "esp32"
@@ -36,15 +37,6 @@ class Settings(BaseSettings):
     # History snapshot downsampling (for WS initial load)
     # Approximate total points per metric over last 24h
     history_snapshot_target_points: int = 600
-
-    # Camera Configuration
-    camera_enabled: bool = True
-    camera_rtsp_url: str = "rtsp://admin:password@192.168.1.100:554/stream"
-    camera_device_key: str = "camera_1"
-    camera_capture_interval: int = 3600  # 1 hour in seconds
-    camera_frame_quality: int = 80  # WebP quality 0-100
-    camera_retention_hours: int = 720  # 30 days
-    camera_stream_enabled: bool = True
 
     # Logging
     log_level: str = "INFO"

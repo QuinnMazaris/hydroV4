@@ -1,7 +1,7 @@
 "use client"
 
 import type React from "react"
-import { useMemo, useState } from "react"
+import { useEffect, useMemo, useRef, useState } from "react"
 
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
@@ -67,6 +67,20 @@ function MetricCard({ title, valueLabel, changeLabel, trend, icon, data, color, 
   )
 }
 
+const normalizeActuatorState = (value: any): 'on' | 'off' | 'unknown' => {
+  if (typeof value === 'boolean') return value ? 'on' : 'off'
+  if (typeof value === 'string') {
+    const lowered = value.toLowerCase()
+    if (lowered === 'on' || lowered === 'off') return lowered
+    const numeric = Number(lowered)
+    if (!Number.isNaN(numeric)) {
+      return numeric > 0 ? 'on' : 'off'
+    }
+  }
+  if (typeof value === 'number') return value > 0 ? 'on' : 'off'
+  return 'unknown'
+}
+
 export default function Dashboard() {
   const { sensorsByDevice, actuatorsByDevice, devices, status, errors } = useWsSensors()
   const timeWindowMs = 24 * 60 * 60 * 1000
@@ -89,11 +103,111 @@ export default function Dashboard() {
     label: string
     unit: string
     color: string
-    currentState?: any
+    currentState: 'on' | 'off' | 'unknown'
   }
 
-  const [actuatorBusy, setActuatorBusy] = useState<Record<string, boolean>>({})
-  const [optimisticActuatorStates, setOptimisticActuatorStates] = useState<Record<string, any>>({})
+  type OptimisticEntry = {
+    state: 'on' | 'off'
+    queuedAt: number
+  }
+
+  const OPTIMISTIC_TIMEOUT_MS = 15_000
+
+  const [optimisticActuatorStates, setOptimisticActuatorStates] = useState<Record<string, OptimisticEntry>>({})
+
+  type PendingActuatorRequest = {
+    deviceId: string
+    actuatorKey: string
+    optimisticKey: string
+    nextState: 'on' | 'off'
+  }
+
+  const FLUSH_DELAY_MS = 160
+  const pendingActuatorsRef = useRef<Record<string, PendingActuatorRequest>>({})
+  const pendingOrderRef = useRef<string[]>([])
+  const flushTimerRef = useRef<number | null>(null)
+  const isFlushingRef = useRef(false)
+
+  const scheduleFlush = () => {
+    if (flushTimerRef.current != null) return
+    flushTimerRef.current = window.setTimeout(() => {
+      flushTimerRef.current = null
+      void flushPendingActuators()
+    }, FLUSH_DELAY_MS)
+  }
+
+  const flushPendingActuators = async () => {
+    if (isFlushingRef.current) {
+      scheduleFlush()
+      return
+    }
+
+    const snapshotKeys = pendingOrderRef.current.slice()
+    const snapshotEntries = snapshotKeys
+      .map((key) => pendingActuatorsRef.current[key])
+      .filter((entry): entry is PendingActuatorRequest => !!entry)
+
+    if (snapshotEntries.length === 0) {
+      return
+    }
+
+    // Clear pending buffers before sending; keep copy for error handling
+    pendingActuatorsRef.current = {}
+    pendingOrderRef.current = []
+
+    isFlushingRef.current = true
+    try {
+      const body = {
+        commands: snapshotEntries.map((entry) => ({
+          device_id: entry.deviceId,
+          actuator_key: entry.actuatorKey,
+          state: entry.nextState,
+        })),
+      }
+
+      console.log('📡 API Batch Request:', body)
+
+      const res = await fetch('/api/actuators/batch-control', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      })
+
+      if (!res.ok) {
+        const message = await res.text()
+        console.error('❌ API Batch Error:', { status: res.status, message })
+        throw new Error(message || 'Failed to send actuator commands')
+      }
+    } catch (error) {
+      console.error('Failed to send actuator commands', error)
+      setOptimisticActuatorStates((prev) => {
+        const next = { ...prev }
+        for (const entry of snapshotEntries) {
+          const optimistic = next[entry.optimisticKey]
+          if (optimistic && optimistic.state === entry.nextState) {
+            delete next[entry.optimisticKey]
+          }
+        }
+        return next
+      })
+      if (typeof window !== 'undefined') {
+        window.alert?.('Failed to send actuator command.')
+      }
+    } finally {
+      isFlushingRef.current = false
+      if (Object.keys(pendingActuatorsRef.current).length > 0) {
+        scheduleFlush()
+      }
+    }
+  }
+
+  const enqueueActuatorRequest = (entry: PendingActuatorRequest) => {
+    pendingActuatorsRef.current[entry.optimisticKey] = entry
+    if (!pendingOrderRef.current.includes(entry.optimisticKey)) {
+      pendingOrderRef.current.push(entry.optimisticKey)
+    }
+    scheduleFlush()
+  }
 
   const actuatorDevices = useMemo(() => {
     return Object.entries(devices)
@@ -101,10 +215,12 @@ export default function Dashboard() {
         const actuatorEntries = info.actuators || {}
         const actuators: ActuatorInfo[] = Object.entries(actuatorEntries).map(([key, meta]) => {
           // Get current state from the actuator stream (live data)
-          const liveState = actuatorsByDevice[deviceId]?.[key]?.[actuatorsByDevice[deviceId][key].length - 1]?.value
+          const liveValue = actuatorsByDevice[deviceId]?.[key]?.[actuatorsByDevice[deviceId][key].length - 1]?.value
           const optimisticKey = `${deviceId}:${key}`
+          const liveState = normalizeActuatorState(liveValue)
+          const optimisticEntry = optimisticActuatorStates[optimisticKey]
           // Use optimistic state if available, otherwise fall back to live state
-          const currentState = optimisticKey in optimisticActuatorStates ? optimisticActuatorStates[optimisticKey] : liveState
+          const currentState = optimisticEntry ? optimisticEntry.state : liveState
           return {
             key,
             label: meta.label || key,
@@ -124,89 +240,30 @@ export default function Dashboard() {
 
   const recentErrors = useMemo(() => errors.slice(-5).reverse(), [errors])
 
-  // Check if camera device exists
-  const hasCameraDevice = useMemo(() => {
-    return Object.keys(devices).some(key => key.startsWith('camera_'))
-  }, [devices])
-
-  const cameraDeviceKey = useMemo(() => {
-    return Object.keys(devices).find(key => key.startsWith('camera_')) || 'camera_1'
-  }, [devices])
-
-  const handleActuatorToggle = async (deviceId: string, actuator: ActuatorInfo) => {
+  const handleActuatorToggle = (deviceId: string, actuator: ActuatorInfo) => {
     console.log('🔄 Toggle clicked:', { deviceId, actuator })
     if (!actuator || !actuator.key) {
       console.warn('Invalid actuator', deviceId, actuator)
       return
     }
 
-    const busyKey = `${deviceId}:${actuator.key}`
     const optimisticKey = `${deviceId}:${actuator.key}`
 
     // Determine next state based on current state
     const currentState = actuator.currentState
-    let nextState: string
-    if (typeof currentState === 'boolean') {
-      nextState = currentState ? 'off' : 'on'
-    } else if (typeof currentState === 'string') {
-      nextState = currentState.toLowerCase() === 'on' ? 'off' : 'on'
-    } else {
-      nextState = 'on' // Default to turning on if unknown state
-    }
+    const nextState: 'on' | 'off' = currentState === 'on' ? 'off' : 'on'
 
     // Optimistic update - immediately update UI
-    setOptimisticActuatorStates((prev) => ({ ...prev, [optimisticKey]: nextState }))
-    setActuatorBusy((prev) => ({ ...prev, [busyKey]: true }))
-
-    try {
-      // Use Next.js rewrite for API calls - this goes through the proxy
-      const url = `/api/actuators/${deviceId}/control`
-      const payload = {
-        actuator_key: actuator.key,
-        state: nextState
-      }
-      console.log('📡 API Request:', { url, payload })
-
-      const res = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-      })
-      if (!res.ok) {
-        const message = await res.text()
-        console.error('❌ API Error:', { status: res.status, message })
-        throw new Error(message || 'Failed to send actuator command')
-      }
-      console.log('✅ API Success') // API call succeeded
-
-      // Clear optimistic state after successful API call - let live data take over
-      setTimeout(() => {
-        setOptimisticActuatorStates((prev) => {
-          const next = { ...prev }
-          delete next[optimisticKey]
-          return next
-        })
-      }, 3000) // Give live data time to arrive via WebSocket
-    } catch (error) {
-      console.error('Failed to send actuator command', error)
-
-      // Revert optimistic update on error
-      setOptimisticActuatorStates((prev) => {
-        const next = { ...prev }
-        delete next[optimisticKey]
-        return next
-      })
-
-      if (typeof window !== 'undefined') {
-        window.alert?.('Failed to send actuator command.')
-      }
-    } finally {
-      setActuatorBusy((prev) => {
-        const next = { ...prev }
-        delete next[busyKey]
-        return next
-      })
-    }
+    setOptimisticActuatorStates((prev) => ({
+      ...prev,
+      [optimisticKey]: { state: nextState, queuedAt: Date.now() },
+    }))
+    enqueueActuatorRequest({
+      deviceId,
+      actuatorKey: actuator.key,
+      optimisticKey,
+      nextState,
+    })
   }
 
   const deviceActivities = useMemo(() => {
@@ -290,6 +347,35 @@ export default function Dashboard() {
   }, [devices, sensorsByDevice, timeWindowMs]);
 
 
+  useEffect(() => {
+    setOptimisticActuatorStates((prev) => {
+      if (!Object.keys(prev).length) return prev
+      let updated = false
+      const next = { ...prev }
+      for (const [optimisticKey, entry] of Object.entries(prev)) {
+        const [deviceId, actuatorKey] = optimisticKey.split(':')
+        const series = actuatorsByDevice[deviceId]?.[actuatorKey]
+        const liveValue = series?.[series.length - 1]?.value
+        const liveState = normalizeActuatorState(liveValue)
+        const now = Date.now()
+        if (liveState === entry.state || now - entry.queuedAt >= OPTIMISTIC_TIMEOUT_MS) {
+          delete next[optimisticKey]
+          updated = true
+        }
+      }
+      return updated ? next : prev
+    })
+  }, [actuatorsByDevice])
+
+  useEffect(() => {
+    return () => {
+      if (flushTimerRef.current != null) {
+        window.clearTimeout(flushTimerRef.current)
+      }
+    }
+  }, [])
+
+
   // No primary metric chart; sparklines serve as primary visualization
 
   return (
@@ -324,12 +410,10 @@ export default function Dashboard() {
         </header>
 
         <div className="container mx-auto flex-1 px-6 py-8">
-          {/* Camera Feed - Full width at top if available */}
-          {hasCameraDevice && (
-            <div className="mb-8">
-              <CameraFeed deviceKey={cameraDeviceKey} />
-            </div>
-          )}
+          {/* Camera Feed - Full width at top */}
+          <div className="mb-8">
+            <CameraFeed deviceKey="camera_1" />
+          </div>
 
           {/* Metrics Grid */}
           <div className="mb-8 grid grid-cols-1 gap-6 md:grid-cols-2 lg:grid-cols-3">
@@ -362,21 +446,7 @@ export default function Dashboard() {
                   <div className="grid gap-6 grid-cols-2 md:grid-cols-4 lg:grid-cols-6">
                     {actuators.map((actuator) => {
                       const busyKey = `${deviceId}:${actuator.key}`
-                      const busy = actuatorBusy[busyKey] ?? false
-
-                      let stateLabel: string
-                      let isOn: boolean
-                      if (typeof actuator.currentState === "boolean") {
-                        isOn = actuator.currentState
-                        stateLabel = isOn ? "on" : "off"
-                      } else if (typeof actuator.currentState === "string") {
-                        stateLabel = actuator.currentState.toLowerCase()
-                        isOn = stateLabel === "on"
-                      } else {
-                        stateLabel = "unknown"
-                        isOn = false
-                      }
-
+                      const isOn = actuator.currentState === 'on'
                       const label = actuator.label || actuator.key
 
                       return (
@@ -385,7 +455,6 @@ export default function Dashboard() {
                           id={busyKey}
                           label={label}
                           checked={isOn}
-                          loading={busy}
                           onToggle={() => handleActuatorToggle(deviceId, actuator)}
                         />
                       )
