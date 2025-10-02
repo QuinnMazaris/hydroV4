@@ -8,10 +8,9 @@ import { Camera, Activity, PlayCircle } from "lucide-react"
 
 interface CameraFeedProps {
   deviceKey?: string
-  showControls?: boolean
 }
 
-export function CameraFeed({ deviceKey = "camera_1", showControls = true }: CameraFeedProps) {
+export function CameraFeed({ deviceKey = "camera_1" }: CameraFeedProps) {
   const videoRef = useRef<HTMLVideoElement>(null)
   const pcRef = useRef<RTCPeerConnection | null>(null)
   const [isConnecting, setIsConnecting] = useState(false)
@@ -172,24 +171,6 @@ export function CameraFeed({ deviceKey = "camera_1", showControls = true }: Came
           />
         </div>
 
-        {showControls && isLive && (
-          <div className="p-3 border-t border-white/10 flex gap-2">
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={connectWebRTC}
-            >
-              Reconnect
-            </Button>
-            <Button
-              size="sm"
-              variant="ghost"
-              onClick={disconnect}
-            >
-              Disconnect
-            </Button>
-          </div>
-        )}
       </CardContent>
     </Card>
   )

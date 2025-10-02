@@ -15,7 +15,8 @@ from .events import event_broker
 from .metrics import build_metric_meta
 from .models import ActuatorControl, Device, DeviceResponse, Metric, Reading
 from .mqtt_client import mqtt_client
-from .services.persistence import delete_old_readings
+from .services.persistence import delete_old_readings, mark_devices_inactive
+from .services.camera_sync import sync_cameras_to_db
 
 app = FastAPI(title="Hydroponic System API", version="1.0.0")
 
@@ -55,12 +56,18 @@ async def shutdown_event():
 
 
 async def maintenance_loop():
-    """Background task handling device heartbeat checks, data retention, and capability refresh."""
+    """Background task handling device heartbeat checks, data retention, and camera sync."""
     last_cleanup = datetime.utcnow()
     cleanup_interval = timedelta(hours=24)
     while True:
         try:
-            await mqtt_client.mark_inactive_devices()
+            # Sync cameras from MediaMTX to database
+            await sync_cameras_to_db()
+
+            # Mark inactive devices (both MQTT and cameras)
+            cutoff_time = datetime.utcnow() - timedelta(seconds=settings.sensor_discovery_timeout)
+            await mqtt_client.mark_inactive_devices()  # MQTT devices
+            await mark_devices_inactive(cutoff_time, device_type='camera')  # Cameras
 
             now = datetime.utcnow()
             if settings.data_retention_days > 0 and (now - last_cleanup) >= cleanup_interval:
@@ -749,6 +756,97 @@ async def health_check():
         "mqtt_connected": mqtt_client.is_connected,
         "timestamp": datetime.utcnow()
     }
+
+
+# Camera endpoints
+import httpx
+
+MEDIAMTX_API_URL = "http://localhost:9997"
+
+@app.get("/api/camera/list")
+async def list_cameras():
+    """Get list of available cameras from MediaMTX"""
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            # Note: MediaMTX API requires basic auth by default, but we configured it without auth
+            response = await client.get(f"{MEDIAMTX_API_URL}/v3/paths/list")
+
+            if response.status_code == 404:
+                # Try v2 API
+                response = await client.get(f"{MEDIAMTX_API_URL}/v2/paths/list")
+
+            if response.status_code != 200:
+                raise HTTPException(status_code=502, detail="MediaMTX API unavailable")
+
+            data = response.json()
+
+            # Extract camera paths (filter out system paths if needed)
+            cameras = []
+            items = data.get("items", []) if isinstance(data, dict) else data
+
+            for item in items:
+                path_name = item.get("name") or item.get("path", "")
+
+                # Skip if not a camera path (you can adjust this filter)
+                if not path_name or path_name.startswith("_"):
+                    continue
+
+                cameras.append({
+                    "device_key": path_name,
+                    "name": item.get("name", path_name),
+                    "ready": item.get("ready", False),
+                    "tracks": item.get("tracks", []),
+                    "readers": item.get("readers", 0),
+                    "whep_url": f"http://localhost:8889/{path_name}/whep"
+                })
+
+            return {
+                "cameras": cameras,
+                "count": len(cameras)
+            }
+
+    except httpx.RequestError as e:
+        raise HTTPException(status_code=502, detail=f"Failed to connect to MediaMTX: {str(e)}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error fetching cameras: {str(e)}")
+
+
+@app.get("/api/camera/health")
+async def camera_health():
+    """Get health/status of all cameras"""
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            response = await client.get(f"{MEDIAMTX_API_URL}/v3/paths/list")
+
+            if response.status_code == 404:
+                response = await client.get(f"{MEDIAMTX_API_URL}/v2/paths/list")
+
+            if response.status_code != 200:
+                raise HTTPException(status_code=502, detail="MediaMTX API unavailable")
+
+            data = response.json()
+            items = data.get("items", []) if isinstance(data, dict) else data
+
+            cameras = []
+            for item in items:
+                path_name = item.get("name") or item.get("path", "")
+                if not path_name or path_name.startswith("_"):
+                    continue
+
+                cameras.append({
+                    "device_key": path_name,
+                    "online": item.get("ready", False),
+                    "ready": item.get("ready", False),
+                    "bytes_sent": item.get("bytesSent", 0),
+                    "readers": item.get("readers", 0)
+                })
+
+            return {"cameras": cameras}
+
+    except httpx.RequestError as e:
+        raise HTTPException(status_code=502, detail=f"Failed to connect to MediaMTX: {str(e)}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error checking camera health: {str(e)}")
 
 
 if __name__ == "__main__":

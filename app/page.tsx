@@ -12,6 +12,7 @@ import { describeValue, resolveMetricMeta } from "@/lib/metrics"
 import { useWsSensors } from "@/hooks/use-ws-metrics"
 import { DeviceToggle } from "@/components/device-toggle"
 import { CameraFeed } from "@/components/camera-feed"
+import { useCameras } from "@/hooks/use-cameras"
 
 interface MetricCardProps {
   title: string
@@ -83,6 +84,7 @@ const normalizeActuatorState = (value: any): 'on' | 'off' | 'unknown' => {
 
 export default function Dashboard() {
   const { sensorsByDevice, actuatorsByDevice, devices, status, errors } = useWsSensors()
+  const { cameras, isLoading: camerasLoading } = useCameras()
   const timeWindowMs = 24 * 60 * 60 * 1000
 
   const formatRelativeTime = (timestamp?: number | null) => {
@@ -410,10 +412,14 @@ export default function Dashboard() {
         </header>
 
         <div className="container mx-auto flex-1 px-6 py-8">
-          {/* Camera Feed - Full width at top */}
-          <div className="mb-8">
-            <CameraFeed deviceKey="camera_1" />
-          </div>
+          {/* Camera Feeds - Dynamically loaded from MediaMTX */}
+          {!camerasLoading && cameras.length > 0 && (
+            <div className="mb-8 space-y-6">
+              {cameras.map((camera) => (
+                <CameraFeed key={camera.device_key} deviceKey={camera.device_key} />
+              ))}
+            </div>
+          )}
 
           {/* Metrics Grid */}
           <div className="mb-8 grid grid-cols-1 gap-6 md:grid-cols-2 lg:grid-cols-3">
