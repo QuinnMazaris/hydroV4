@@ -49,7 +49,7 @@ export function CameraFeed({ deviceKey = "camera_1" }: CameraFeedProps) {
       // Monitor connection state
       pc.onconnectionstatechange = () => {
         console.log('WebRTC connection state:', pc.connectionState)
-        if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') {
+        if (pc.connectionState === 'failed') {
           setError('Connection lost')
           setIsLive(false)
         }

@@ -10,13 +10,13 @@ class Settings(BaseSettings):
     mqtt_password: Optional[str] = None
     mqtt_keepalive: int = 60
     mqtt_qos: int = 1
-    actuator_publish_rate_hz: float = 15.0
+    actuator_publish_rate_hz: float = 30.0  # Increased from 15 to 30 Hz for better responsiveness
 
     # Topic Configuration
     mqtt_base_topic: str = "esp32"
     sensor_data_topic: str = "esp32/data"
     relay_status_topic: str = "esp32/relay/status"
-    relay_control_topic: str = "esp32/relay/control"
+    relay_control_topic: str = ""  # Dynamic per-device: {mqtt_base_topic}/{device_id}/control
     discovery_request_topic: str = "esp32/discovery/request"
     discovery_response_topic: str = "esp32/+/discovery"
 

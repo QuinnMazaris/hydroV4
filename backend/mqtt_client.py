@@ -919,23 +919,16 @@ class MQTTClient:
                 resolved_topics.add(formatted)
 
             def _payload_for(control: ActuatorControl) -> Dict[str, Any]:
-                payload: Dict[str, Any] = {
-                    "device_id": device_id,
+                """Build minimal command payload - pass actuator key as-is from discovery."""
+                return {
                     "actuator": control.actuator_key,
                     "state": control.state,
                 }
-                key_lower = control.actuator_key.lower()
-                if key_lower.startswith("relay"):
-                    suffix = control.actuator_key[5:]
-                    if suffix.isdigit():
-                        payload["relay"] = int(suffix)
-                return payload
 
             command_payloads = [_payload_for(control) for control in controls]
 
+            # ESP32 detects batch by presence of "commands" array
             batch_payload = {
-                "device_id": device_id,
-                "batched": True,
                 "commands": command_payloads,
             }
 
@@ -970,17 +963,11 @@ class MQTTClient:
                     formatted = topic_template.format(device_id=normalized_device_id)
                 resolved_topics.add(formatted)
 
+            # Build minimal command payload - pass actuator key as-is from discovery
             payload: Dict[str, Any] = {
-                "device_id": device_id,
                 "actuator": actuator_control.actuator_key,
                 "state": actuator_control.state,
             }
-
-            # Provide numeric relay identifier when using conventional relay keys (e.g. relay1)
-            if actuator_control.actuator_key.lower().startswith("relay"):
-                suffix = actuator_control.actuator_key[5:]
-                if suffix.isdigit():
-                    payload["relay"] = int(suffix)
 
             # Publish using the rate-limited topic aggregator
             for topic in sorted(resolved_topics):

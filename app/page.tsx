@@ -113,7 +113,7 @@ export default function Dashboard() {
     queuedAt: number
   }
 
-  const OPTIMISTIC_TIMEOUT_MS = 15_000
+  const OPTIMISTIC_TIMEOUT_MS = 3_000  // Reduced from 15s to 3s for faster error feedback
 
   const [optimisticActuatorStates, setOptimisticActuatorStates] = useState<Record<string, OptimisticEntry>>({})
 
@@ -124,7 +124,7 @@ export default function Dashboard() {
     nextState: 'on' | 'off'
   }
 
-  const FLUSH_DELAY_MS = 160
+  const FLUSH_DELAY_MS = 100  // Reduced from 300ms to 100ms for better responsiveness
   const pendingActuatorsRef = useRef<Record<string, PendingActuatorRequest>>({})
   const pendingOrderRef = useRef<string[]>([])
   const flushTimerRef = useRef<number | null>(null)
@@ -167,7 +167,7 @@ export default function Dashboard() {
         })),
       }
 
-      console.log('📡 API Batch Request:', body)
+      console.log('📡 Sending batch:', body.commands.map(c => `${c.actuator_key}→${c.state}`).join(', '))
 
       const res = await fetch('/api/actuators/batch-control', {
         method: 'POST',
@@ -354,13 +354,24 @@ export default function Dashboard() {
       if (!Object.keys(prev).length) return prev
       let updated = false
       const next = { ...prev }
+      const now = Date.now()
+
       for (const [optimisticKey, entry] of Object.entries(prev)) {
         const [deviceId, actuatorKey] = optimisticKey.split(':')
         const series = actuatorsByDevice[deviceId]?.[actuatorKey]
         const liveValue = series?.[series.length - 1]?.value
         const liveState = normalizeActuatorState(liveValue)
-        const now = Date.now()
-        if (liveState === entry.state || now - entry.queuedAt >= OPTIMISTIC_TIMEOUT_MS) {
+        const age = now - entry.queuedAt
+
+        // Clear optimistic state if:
+        // 1. Live state matches optimistic (command succeeded)
+        // 2. Timeout expired (command likely failed)
+        // 3. Live state differs AND >1s passed (command failed, device responded with different state)
+        if (
+          liveState === entry.state ||
+          age >= OPTIMISTIC_TIMEOUT_MS ||
+          (liveState !== entry.state && liveState !== 'unknown' && age > 1000)
+        ) {
           delete next[optimisticKey]
           updated = true
         }

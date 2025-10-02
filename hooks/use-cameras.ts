@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react"
+import { useEffect, useMemo, useRef, useState } from "react"
 
 export interface Camera {
   device_key: string
@@ -55,13 +55,16 @@ export function useCameras() {
   const [rawDevices, setRawDevices] = useState<DeviceApiResponse[]>([])
   const [isLoading, setIsLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const hasLoadedRef = useRef(false)
 
   useEffect(() => {
     let ignore = false
 
     const fetchCameras = async () => {
       try {
-        setIsLoading(true)
+        if (!hasLoadedRef.current) {
+          setIsLoading(true)
+        }
         const response = await fetch(API_URL)
 
         if (!response.ok) {
@@ -77,6 +80,7 @@ export function useCameras() {
         if (!ignore) {
           setRawDevices(devices)
           setError(null)
+          hasLoadedRef.current = true
         }
       } catch (err) {
         console.error("Error fetching cameras:", err)

@@ -394,42 +394,6 @@ async def control_actuators_batch(
     }
 
 
-@app.post("/api/actuators/{device_id}/control")
-async def control_actuator(
-    device_id: str,
-    actuator_control: ActuatorControl,
-    db: AsyncSession = Depends(get_db),
-):
-    """Control any actuator via MQTT after validating it exists as an actuator in the database."""
-    if actuator_control.state not in ["on", "off"]:
-        raise HTTPException(status_code=400, detail="State must be 'on' or 'off'")
-
-    # Validate that the actuator exists and is of type 'actuator'
-    metric_row = await db.execute(
-        select(Metric)
-        .join(Device, Device.id == Metric.device_id)
-        .where(
-            (Device.device_key == device_id)
-            & (Metric.metric_key == actuator_control.actuator_key)
-            & (Metric.metric_type == 'actuator')
-        )
-    )
-    metric_obj = metric_row.scalar_one_or_none()
-    if not metric_obj:
-        raise HTTPException(
-            status_code=404,
-            detail=f"Actuator '{actuator_control.actuator_key}' not found for device '{device_id}'"
-        )
-
-    try:
-        await mqtt_client.publish_actuator_control(device_id, actuator_control)
-        return {
-            "message": f"Actuator '{actuator_control.actuator_key}' control command sent",
-            "status": "success"
-        }
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Failed to send actuator command: {exc}")
-
 # Health check
 @app.get("/api/health")
 async def health_check():
