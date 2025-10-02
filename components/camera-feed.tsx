@@ -64,7 +64,8 @@ export function CameraFeed({ deviceKey = "camera_1" }: CameraFeedProps) {
       await pc.setLocalDescription(offer)
 
       // Send offer to MediaMTX WHEP endpoint
-      const whepUrl = `http://${window.location.hostname}:8889/${deviceKey}/whep`
+      const mediamtxPort = process.env.NEXT_PUBLIC_MEDIAMTX_WEBRTC_PORT || '8889'
+      const whepUrl = `http://${window.location.hostname}:${mediamtxPort}/${deviceKey}/whep`
 
       const response = await fetch(whepUrl, {
         method: 'POST',

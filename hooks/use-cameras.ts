@@ -107,6 +107,7 @@ export function useCameras() {
     }
 
     const hostname = typeof window !== "undefined" ? window.location.hostname : "localhost"
+    const mediamtxPort = process.env.NEXT_PUBLIC_MEDIAMTX_WEBRTC_PORT || "8889"
 
     return rawDevices.map((device) => {
       const metadata = parseMetadata(device.device_metadata ?? null)
@@ -116,7 +117,7 @@ export function useCameras() {
       const readers = typeof metadata.readers === "number" ? metadata.readers : 0
       const whepUrl = metadata.whep_url && metadata.whep_url.startsWith("http")
         ? metadata.whep_url
-        : `http://${hostname}:8889/${device.device_key}/whep`
+        : `http://${hostname}:${mediamtxPort}/${device.device_key}/whep`
 
       return {
         device_key: device.device_key,

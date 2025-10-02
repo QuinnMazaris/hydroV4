@@ -25,7 +25,15 @@ class Settings(BaseSettings):
 
     # API Configuration
     api_host: str = "0.0.0.0"
-    api_port: int = 8000
+    api_port: int = 8001
+
+    # MediaMTX Configuration
+    mediamtx_host: str = "localhost"
+    mediamtx_api_port: int = 9997
+    mediamtx_webrtc_port: int = 8889
+
+    # Frontend Configuration
+    frontend_port: int = 3001
 
     # Sensor Discovery Configuration
     sensor_discovery_timeout: int = 300  # 5 minutes

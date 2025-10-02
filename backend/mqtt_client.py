@@ -893,6 +893,60 @@ class MQTTClient:
         except Exception as exc:
             logger.error(f"Error marking inactive devices: {exc}")
 
+    async def publish_actuator_batch(self, device_id: str, controls: List[ActuatorControl]):
+        """Publish multiple actuator commands for a device in a single MQTT payload."""
+        if not controls:
+            return
+        if len(controls) == 1:
+            await self.publish_actuator_control(device_id, controls[0])
+            return
+
+        if not self.client or not self.is_connected:
+            raise Exception("MQTT client not connected")
+
+        try:
+            topic_template = settings.relay_control_topic.strip()
+            resolved_topics: Set[str] = set()
+
+            normalized_device_id = re.sub(r"[^A-Za-z0-9_\-]", "_", device_id.strip()) or device_id
+            base_topic = settings.mqtt_base_topic.strip('/')
+            resolved_topics.add(f"{base_topic}/{normalized_device_id}/control")
+
+            if topic_template:
+                formatted = topic_template
+                if "{device_id}" in topic_template:
+                    formatted = topic_template.format(device_id=normalized_device_id)
+                resolved_topics.add(formatted)
+
+            def _payload_for(control: ActuatorControl) -> Dict[str, Any]:
+                payload: Dict[str, Any] = {
+                    "device_id": device_id,
+                    "actuator": control.actuator_key,
+                    "state": control.state,
+                }
+                key_lower = control.actuator_key.lower()
+                if key_lower.startswith("relay"):
+                    suffix = control.actuator_key[5:]
+                    if suffix.isdigit():
+                        payload["relay"] = int(suffix)
+                return payload
+
+            command_payloads = [_payload_for(control) for control in controls]
+
+            batch_payload = {
+                "device_id": device_id,
+                "batched": True,
+                "commands": command_payloads,
+            }
+
+            for topic in sorted(resolved_topics):
+                normalized_topic = topic.strip('/')
+                await self._publish_rate_limited(normalized_topic, batch_payload)
+
+        except Exception as exc:
+            logger.error(f"Error publishing actuator batch: {exc}")
+            raise
+
     async def publish_actuator_control(self, device_id: str, actuator_control: ActuatorControl):
         """Publish generic actuator control command to ESP32"""
         if not self.client or not self.is_connected:

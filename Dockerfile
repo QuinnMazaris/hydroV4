@@ -22,8 +22,11 @@ COPY tsconfig.json ./
 COPY postcss.config.mjs ./
 COPY components.json ./
 
-# Build Next.js app with API_PORT environment variable
-ENV API_PORT=8001
+# Build Next.js app with environment variables
+ARG API_PORT=8001
+ARG MEDIAMTX_WEBRTC_PORT=8889
+ENV API_PORT=${API_PORT}
+ENV MEDIAMTX_WEBRTC_PORT=${MEDIAMTX_WEBRTC_PORT}
 RUN npm run build
 
 # Final stage - Python with Node
@@ -62,19 +65,24 @@ COPY --from=frontend-builder /app/hooks ./frontend/hooks
 COPY --from=frontend-builder /app/lib ./frontend/lib
 COPY --from=frontend-builder /app/styles ./frontend/styles
 
-# Set environment variables
+# Set environment variables with defaults
 ENV PYTHONPATH=/app
 ENV NODE_ENV=production
-ENV PORT=3001
-ENV MQTT_BROKER=127.0.0.1
+ENV PORT=${PORT:-3001}
+ENV API_PORT=${API_PORT:-8001}
+ENV MQTT_BROKER=${MQTT_BROKER:-127.0.0.1}
+ENV MQTT_PORT=${MQTT_PORT:-1883}
+ENV MEDIAMTX_HOST=${MEDIAMTX_HOST:-localhost}
+ENV MEDIAMTX_API_PORT=${MEDIAMTX_API_PORT:-9997}
+ENV MEDIAMTX_WEBRTC_PORT=${MEDIAMTX_WEBRTC_PORT:-8889}
 
 # Expose ports
-EXPOSE 3001 8000
+EXPOSE ${PORT:-3001} ${API_PORT:-8001}
 
-# Create startup script
+# Create startup script that uses PORT variable
 RUN echo '#!/bin/bash\n\
 cd /app && python -m backend &\n\
-cd /app/frontend && npm start -- -p 3001 &\n\
+cd /app/frontend && npm start -- -p ${PORT:-3001} &\n\
 wait' > /app/start.sh && chmod +x /app/start.sh
 
 CMD ["/app/start.sh"]

@@ -7,10 +7,18 @@ from typing import Any, Dict, List, Optional
 import httpx
 from loguru import logger
 
+from ..config import settings
 from ..services.persistence import upsert_device
 
 
-MEDIAMTX_API_URL = "http://localhost:9997"
+def get_mediamtx_api_url() -> str:
+    """Get the MediaMTX API URL from settings."""
+    return f"http://{settings.mediamtx_host}:{settings.mediamtx_api_port}"
+
+
+def get_mediamtx_whep_url(path_name: str) -> str:
+    """Get the MediaMTX WHEP URL for a given path."""
+    return f"http://{settings.mediamtx_host}:{settings.mediamtx_webrtc_port}/{path_name}/whep"
 
 
 async def sync_cameras_to_db() -> Dict[str, Any]:
@@ -27,12 +35,13 @@ async def sync_cameras_to_db() -> Dict[str, Any]:
     }
 
     try:
+        mediamtx_api_url = get_mediamtx_api_url()
         async with httpx.AsyncClient(timeout=5.0) as client:
             # Try v3 API first, fall back to v2
-            response = await client.get(f"{MEDIAMTX_API_URL}/v3/paths/list")
+            response = await client.get(f"{mediamtx_api_url}/v3/paths/list")
 
             if response.status_code == 404:
-                response = await client.get(f"{MEDIAMTX_API_URL}/v2/paths/list")
+                response = await client.get(f"{mediamtx_api_url}/v2/paths/list")
 
             if response.status_code != 200:
                 error_msg = f"MediaMTX API returned status {response.status_code}"
@@ -68,7 +77,7 @@ async def sync_cameras_to_db() -> Dict[str, Any]:
                         "tracks": item.get("tracks", []),
                         "readers": item.get("readers", 0),
                         "bytes_sent": item.get("bytesSent", 0),
-                        "whep_url": f"http://localhost:8889/{path_name}/whep",
+                        "whep_url": get_mediamtx_whep_url(path_name),
                         "last_sync": current_time.isoformat(),
                     }
 
