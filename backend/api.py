@@ -428,48 +428,24 @@ async def health_check():
 
 # ---------------- Camera Frame Endpoints ---------------- #
 
-@app.get("/api/cameras/{device_key}/frames", response_model=List[CameraFrameResponse])
-async def get_camera_frames(
+# Simplified Camera Image Endpoints
+@app.get("/api/cameras/{device_key}/image")
+async def get_camera_image(
     device_key: str,
-    start_time: Optional[datetime] = Query(None, description="Filter frames after this time"),
-    end_time: Optional[datetime] = Query(None, description="Filter frames before this time"),
-    limit: int = Query(100, ge=1, le=1000, description="Maximum number of frames to return"),
-    offset: int = Query(0, ge=0, description="Number of frames to skip"),
+    days_ago: int = Query(0, ge=0, le=30, description="Get image from N days ago (0 = latest)"),
     db: AsyncSession = Depends(get_db),
 ):
-    """
-    Get frames for a specific camera with optional time filtering and pagination.
+    """Get camera image - latest by default, or historical by days_ago parameter."""
+    from datetime import datetime, timedelta
 
-    Query parameters:
-    - start_time: ISO 8601 datetime (e.g., 2024-01-01T00:00:00)
-    - end_time: ISO 8601 datetime
-    - limit: Max frames to return (1-1000, default 100)
-    - offset: Number of frames to skip for pagination
-    """
-    query = select(CameraFrame).where(CameraFrame.device_key == device_key)
+    # Calculate target timestamp
+    target_time = datetime.utcnow() - timedelta(days=days_ago)
 
-    if start_time:
-        query = query.where(CameraFrame.timestamp >= start_time)
-    if end_time:
-        query = query.where(CameraFrame.timestamp <= end_time)
-
-    query = query.order_by(CameraFrame.timestamp.desc()).limit(limit).offset(offset)
-
-    result = await db.execute(query)
-    frames = result.scalars().all()
-
-    return frames
-
-
-@app.get("/api/cameras/{device_key}/frames/latest", response_model=CameraFrameResponse)
-async def get_latest_frame(
-    device_key: str,
-    db: AsyncSession = Depends(get_db),
-):
-    """Get the most recent frame for a camera."""
+    # Find frame closest to target time
     query = (
         select(CameraFrame)
         .where(CameraFrame.device_key == device_key)
+        .where(CameraFrame.timestamp <= target_time)
         .order_by(CameraFrame.timestamp.desc())
         .limit(1)
     )
@@ -478,28 +454,7 @@ async def get_latest_frame(
     frame = result.scalar_one_or_none()
 
     if not frame:
-        raise HTTPException(status_code=404, detail=f"No frames found for camera {device_key}")
-
-    return frame
-
-
-@app.get("/api/cameras/{device_key}/frames/{frame_id}/image")
-async def get_frame_image(
-    device_key: str,
-    frame_id: int,
-    db: AsyncSession = Depends(get_db),
-):
-    """Get the actual image file for a specific frame."""
-    query = select(CameraFrame).where(
-        CameraFrame.id == frame_id,
-        CameraFrame.device_key == device_key
-    )
-
-    result = await db.execute(query)
-    frame = result.scalar_one_or_none()
-
-    if not frame:
-        raise HTTPException(status_code=404, detail="Frame not found")
+        raise HTTPException(status_code=404, detail=f"No frame found for camera {device_key}")
 
     # Build full file path
     full_path = os.path.join("/app", frame.file_path)
@@ -514,33 +469,12 @@ async def get_frame_image(
     )
 
 
-@app.get("/api/cameras/{device_key}/frames/{frame_id}", response_model=CameraFrameResponse)
-async def get_frame_metadata(
-    device_key: str,
-    frame_id: int,
-    db: AsyncSession = Depends(get_db),
-):
-    """Get metadata for a specific frame."""
-    query = select(CameraFrame).where(
-        CameraFrame.id == frame_id,
-        CameraFrame.device_key == device_key
-    )
-
-    result = await db.execute(query)
-    frame = result.scalar_one_or_none()
-
-    if not frame:
-        raise HTTPException(status_code=404, detail="Frame not found")
-
-    return frame
-
-
-@app.post("/api/cameras/{device_key}/frames/capture", response_model=CameraFrameResponse)
-async def capture_frame_manual(
+@app.post("/api/cameras/{device_key}/capture")
+async def capture_camera_frame(
     device_key: str,
     db: AsyncSession = Depends(get_db),
 ):
-    """Manually trigger frame capture for a specific camera."""
+    """Trigger immediate frame capture for a camera."""
     # Verify camera exists and is active
     device_result = await db.execute(
         select(Device).where(
@@ -566,42 +500,6 @@ async def capture_frame_manual(
         )
 
     return frame
-
-
-@app.get("/api/frames", response_model=List[CameraFrameResponse])
-async def get_all_frames(
-    start_time: Optional[datetime] = Query(None, description="Filter frames after this time"),
-    end_time: Optional[datetime] = Query(None, description="Filter frames before this time"),
-    device_key: Optional[str] = Query(None, description="Filter by camera device key"),
-    limit: int = Query(100, ge=1, le=1000, description="Maximum number of frames to return"),
-    offset: int = Query(0, ge=0, description="Number of frames to skip"),
-    db: AsyncSession = Depends(get_db),
-):
-    """
-    Get frames from all cameras with optional filtering and pagination.
-
-    Query parameters:
-    - start_time: ISO 8601 datetime
-    - end_time: ISO 8601 datetime
-    - device_key: Specific camera to filter by
-    - limit: Max frames to return (1-1000, default 100)
-    - offset: Number of frames to skip for pagination
-    """
-    query = select(CameraFrame)
-
-    if device_key:
-        query = query.where(CameraFrame.device_key == device_key)
-    if start_time:
-        query = query.where(CameraFrame.timestamp >= start_time)
-    if end_time:
-        query = query.where(CameraFrame.timestamp <= end_time)
-
-    query = query.order_by(CameraFrame.timestamp.desc()).limit(limit).offset(offset)
-
-    result = await db.execute(query)
-    frames = result.scalars().all()
-
-    return frames
 
 
 if __name__ == "__main__":
