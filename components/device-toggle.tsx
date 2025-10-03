@@ -12,15 +12,17 @@ interface DeviceToggleProps {
 }
 
 export function DeviceToggle({ id, label, checked, disabled = false, onToggle }: DeviceToggleProps) {
-  const handleClick = () => {
+  const handleClick = (e: React.MouseEvent) => {
     if (disabled) return
+    e.preventDefault()
+    e.stopPropagation()
     onToggle?.()
   }
 
   const PlantAnimation = ({ isActive, id }: { isActive: boolean, id: string }) => (
-    <div className="relative w-full h-full flex items-center justify-center">
+    <div className="relative w-full h-full flex items-center justify-center pointer-events-none">
       {isActive ? (
-        <svg viewBox="0 0 24 24" className="w-full h-full" xmlns="http://www.w3.org/2000/svg">
+        <svg viewBox="0 0 24 24" className="w-full h-full pointer-events-none" xmlns="http://www.w3.org/2000/svg">
           <defs>
             <linearGradient id={`tulip-petal-${id}`} x1="0%" y1="0%" x2="0%" y2="100%">
               <stop offset="0%" stopColor="#ff7ab6"/>
@@ -44,7 +46,7 @@ export function DeviceToggle({ id, label, checked, disabled = false, onToggle }:
           <path d="M12 5.6 C 10.2 5.6, 9 7.2, 9 9.3 C 9 12.3, 12 14.2, 12 14.2 C 12 14.2, 15 12.3, 15 9.3 C 15 7.2, 13.8 5.6, 12 5.6 Z" fill={`url(#tulip-petal-${id})`} />
         </svg>
       ) : (
-        <svg viewBox="0 0 24 24" className="w-full h-full text-emerald-300/70" fill="currentColor">
+        <svg viewBox="0 0 24 24" className="w-full h-full text-emerald-300/70 pointer-events-none" fill="currentColor">
           {/* Small seedling */}
           <rect x="11.5" y="12" width="1" height="4" />
           <ellipse cx="10.2" cy="12.5" rx="2" ry="0.9" />
@@ -57,7 +59,7 @@ export function DeviceToggle({ id, label, checked, disabled = false, onToggle }:
   return (
     <Card
       className={cn(
-        "w-full aspect-square p-0 overflow-hidden cursor-pointer border-white/10 backdrop-blur-xl shadow-xl",
+        "w-full aspect-square p-0 overflow-hidden cursor-pointer border-white/10 backdrop-blur-xl shadow-xl select-none active:scale-95 transition-transform duration-100",
         disabled && "cursor-not-allowed opacity-50",
         checked
           ? "bg-emerald-950/30 border-emerald-400/30"
@@ -65,7 +67,8 @@ export function DeviceToggle({ id, label, checked, disabled = false, onToggle }:
       )}
       onClick={handleClick}
       style={{
-        backgroundColor: checked ? "rgba(16, 185, 129, 0.1)" : "rgba(0, 0, 0, 0.55)"
+        backgroundColor: checked ? "rgba(16, 185, 129, 0.1)" : "rgba(0, 0, 0, 0.55)",
+        touchAction: "manipulation"
       }}
     >
       <div className="flex h-full flex-col">
