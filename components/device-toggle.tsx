@@ -58,12 +58,10 @@ export function DeviceToggle({ id, label, checked, disabled = false, onToggle }:
     <Card
       className={cn(
         "w-full aspect-square p-0 overflow-hidden cursor-pointer border-white/10 backdrop-blur-xl shadow-xl",
-        "transition-[transform,background-color,border-color] duration-150 ease-out will-change-transform",
-        "hover:scale-[1.02]",
         disabled && "cursor-not-allowed opacity-50",
         checked
           ? "bg-emerald-950/30 border-emerald-400/30"
-          : "bg-black/55 hover:bg-black/60"
+          : "bg-black/55"
       )}
       onClick={handleClick}
       style={{

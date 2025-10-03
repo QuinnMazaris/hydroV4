@@ -88,12 +88,18 @@ async def capture_single_frame(
         '-rtsp_transport', 'tcp',
         '-i', rtsp_url,
         '-frames:v', '1',
-        '-vf', f'scale={settings.frame_max_width}:-1',  # Maintain aspect ratio
+    ]
+    
+    # Only add scaling if frame_max_width is set (not -1)
+    if settings.frame_max_width > 0:
+        cmd.extend(['-vf', f'scale={settings.frame_max_width}:-1'])  # Maintain aspect ratio
+    
+    cmd.extend([
         '-q:v', str(settings.frame_quality),
         '-f', 'webp',
         '-y',  # Overwrite output file
         output_path
-    ]
+    ])
 
     try:
         # Execute FFmpeg with timeout

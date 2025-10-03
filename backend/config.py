@@ -52,8 +52,8 @@ class Settings(BaseSettings):
     # Frame Capture Configuration
     frame_capture_enabled: bool = True
     frame_capture_interval_minutes: int = 5
-    frame_quality: int = 80  # WebP quality (1-100, higher = better quality)
-    frame_max_width: int = 1920
+    frame_quality: int = 100  # WebP quality (1-100, higher = better quality) - 100 for lossless
+    frame_max_width: int = -1  # Max width (-1 = no scaling, preserve original resolution)
     frame_storage_path: str = "/app/data/camera_frames"
     frame_retention_days: int = 30  # How long to keep frames (0 = forever)
 

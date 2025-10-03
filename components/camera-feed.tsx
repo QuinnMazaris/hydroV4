@@ -41,6 +41,8 @@ export function CameraFeed({ deviceKey = "camera_1" }: CameraFeedProps) {
       pc.ontrack = (event) => {
         if (videoRef.current && event.streams[0]) {
           videoRef.current.srcObject = event.streams[0]
+          // Force play immediately - don't rely on autoPlay if video is out of viewport
+          videoRef.current.play().catch(err => console.error('Play failed:', err))
           setIsLive(true)
           setIsConnecting(false)
         }
