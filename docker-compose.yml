@@ -12,8 +12,9 @@ services:
     container_name: hydro-production
     network_mode: host  # Use host network to access mosquitto on localhost
     volumes:
-      - ./hydro.db:/app/hydro.db  # Persist database
-      - hydro-data:/app/data      # Additional data persistence
+      - ./hydro.db:/app/hydro.db           # Persist database
+      - hydro-data:/app/data               # Additional data persistence (includes camera frames)
+      - ./camera_frames:/app/data/camera_frames  # Optional: direct access to camera frames from host
     environment:
       # Application
       - NODE_ENV=production

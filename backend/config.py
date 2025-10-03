@@ -10,7 +10,7 @@ class Settings(BaseSettings):
     mqtt_password: Optional[str] = None
     mqtt_keepalive: int = 60
     mqtt_qos: int = 1
-    actuator_publish_rate_hz: float = 30.0  # Increased from 15 to 30 Hz for better responsiveness
+    actuator_publish_rate_hz: float = 50.0  # 50 Hz = 20ms minimum interval between MQTT publishes
 
     # Topic Configuration
     mqtt_base_topic: str = "esp32"
@@ -48,6 +48,14 @@ class Settings(BaseSettings):
 
     # Logging
     log_level: str = "INFO"
+
+    # Frame Capture Configuration
+    frame_capture_enabled: bool = True
+    frame_capture_interval_minutes: int = 5
+    frame_quality: int = 80  # WebP quality (1-100, higher = better quality)
+    frame_max_width: int = 1920
+    frame_storage_path: str = "/app/data/camera_frames"
+    frame_retention_days: int = 30  # How long to keep frames (0 = forever)
 
     class Config:
         env_file = ".env"

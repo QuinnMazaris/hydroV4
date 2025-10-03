@@ -155,3 +155,48 @@ class ActuatorCommand(BaseModel):
 
 class ActuatorBatchControl(BaseModel):
     commands: List[ActuatorCommand]
+
+
+class CameraFrame(Base):
+    __tablename__ = "camera_frames"
+
+    id = Column(Integer, primary_key=True, index=True)
+    device_key = Column(String(100), nullable=False, index=True)
+    timestamp = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+    file_path = Column(String(500), nullable=False)
+    file_size = Column(Integer, nullable=True)
+    width = Column(Integer, nullable=True)
+    height = Column(Integer, nullable=True)
+    analyzed_at = Column(DateTime, nullable=True, index=True)
+    analysis_model = Column(String(100), nullable=True)
+    detected_objects = Column(JSON, nullable=True)
+    plant_health_score = Column(Integer, nullable=True)
+    anomaly_detected = Column(Boolean, nullable=True)
+    notes = Column(Text, nullable=True)
+
+
+class CameraFrameResponse(BaseModel):
+    id: int
+    device_key: str
+    timestamp: datetime
+    file_path: str
+    file_size: Optional[int] = None
+    width: Optional[int] = None
+    height: Optional[int] = None
+    analyzed_at: Optional[datetime] = None
+    analysis_model: Optional[str] = None
+    detected_objects: Optional[Dict[str, Any]] = None
+    plant_health_score: Optional[int] = None
+    anomaly_detected: Optional[bool] = None
+    notes: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+
+
+class CameraFrameCreate(BaseModel):
+    device_key: str
+    file_path: str
+    file_size: Optional[int] = None
+    width: Optional[int] = None
+    height: Optional[int] = None

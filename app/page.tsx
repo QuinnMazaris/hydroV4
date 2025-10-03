@@ -113,7 +113,7 @@ export default function Dashboard() {
     queuedAt: number
   }
 
-  const OPTIMISTIC_TIMEOUT_MS = 3_000  // Reduced from 15s to 3s for faster error feedback
+  const OPTIMISTIC_TIMEOUT_MS = 5_000  // Max time to wait for confirmation before reverting
 
   const [optimisticActuatorStates, setOptimisticActuatorStates] = useState<Record<string, OptimisticEntry>>({})
 
@@ -365,12 +365,12 @@ export default function Dashboard() {
 
         // Clear optimistic state if:
         // 1. Live state matches optimistic (command succeeded)
-        // 2. Timeout expired (command likely failed)
-        // 3. Live state differs AND >1s passed (command failed, device responded with different state)
+        // 2. Timeout expired (command likely failed - give up after 5s)
+        // 3. Live state differs AND >2.5s passed (device confirmed different state)
         if (
           liveState === entry.state ||
           age >= OPTIMISTIC_TIMEOUT_MS ||
-          (liveState !== entry.state && liveState !== 'unknown' && age > 1000)
+          (liveState !== entry.state && liveState !== 'unknown' && age > 2500)
         ) {
           delete next[optimisticKey]
           updated = true

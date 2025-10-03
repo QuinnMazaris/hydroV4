@@ -1,12 +1,14 @@
 import asyncio
+import os
 from contextlib import suppress
 from datetime import datetime, timedelta
 from collections import defaultdict
 from typing import Any, Dict, List, Optional
 
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi import WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from sqlalchemy import func, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -14,10 +16,15 @@ from .config import settings
 from .database import AsyncSessionLocal, get_db, init_db
 from .events import event_broker
 from .metrics import build_metric_meta
-from .models import ActuatorBatchControl, ActuatorCommand, ActuatorControl, Device, DeviceResponse, Metric, Reading
+from .models import (
+    ActuatorBatchControl, ActuatorCommand, ActuatorControl,
+    Device, DeviceResponse, Metric, Reading,
+    CameraFrame, CameraFrameResponse
+)
 from .mqtt_client import mqtt_client
 from .services.persistence import delete_old_readings, mark_devices_inactive
 from .services.camera_sync import sync_cameras_to_db
+from .services.frame_capture import capture_all_cameras, cleanup_old_frames, capture_frame_for_camera
 
 app = FastAPI(title="Hydroponic System API", version="1.0.0")
 
@@ -57,23 +64,37 @@ async def shutdown_event():
 
 
 async def maintenance_loop():
-    """Background task handling device heartbeat checks, data retention, and camera sync."""
+    """Background task handling device heartbeat checks, data retention, camera sync, and frame capture."""
     last_cleanup = datetime.utcnow()
+    last_frame_capture = datetime.utcnow()
     cleanup_interval = timedelta(hours=24)
+    frame_capture_interval = timedelta(minutes=settings.frame_capture_interval_minutes)
+
     while True:
         try:
+            now = datetime.utcnow()
+
             # Sync cameras from MediaMTX to database
             await sync_cameras_to_db()
+
+            # Capture frames from all cameras if enabled and interval has passed
+            if settings.frame_capture_enabled and (now - last_frame_capture) >= frame_capture_interval:
+                await capture_all_cameras()
+                last_frame_capture = now
 
             # Mark inactive devices (both MQTT and cameras)
             cutoff_time = datetime.utcnow() - timedelta(seconds=settings.sensor_discovery_timeout)
             await mqtt_client.mark_inactive_devices()  # MQTT devices
             await mark_devices_inactive(cutoff_time, device_type='camera')  # Cameras
 
-            now = datetime.utcnow()
-            if settings.data_retention_days > 0 and (now - last_cleanup) >= cleanup_interval:
-                cutoff = now - timedelta(days=settings.data_retention_days)
-                await delete_old_readings(cutoff)
+            # Cleanup old data once per day
+            if (now - last_cleanup) >= cleanup_interval:
+                if settings.data_retention_days > 0:
+                    cutoff = now - timedelta(days=settings.data_retention_days)
+                    await delete_old_readings(cutoff)
+
+                # Cleanup old frames
+                await cleanup_old_frames()
                 last_cleanup = now
 
             await asyncio.sleep(settings.sensor_heartbeat_interval)
@@ -403,6 +424,184 @@ async def health_check():
         "mqtt_connected": mqtt_client.is_connected,
         "timestamp": datetime.utcnow()
     }
+
+
+# ---------------- Camera Frame Endpoints ---------------- #
+
+@app.get("/api/cameras/{device_key}/frames", response_model=List[CameraFrameResponse])
+async def get_camera_frames(
+    device_key: str,
+    start_time: Optional[datetime] = Query(None, description="Filter frames after this time"),
+    end_time: Optional[datetime] = Query(None, description="Filter frames before this time"),
+    limit: int = Query(100, ge=1, le=1000, description="Maximum number of frames to return"),
+    offset: int = Query(0, ge=0, description="Number of frames to skip"),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Get frames for a specific camera with optional time filtering and pagination.
+
+    Query parameters:
+    - start_time: ISO 8601 datetime (e.g., 2024-01-01T00:00:00)
+    - end_time: ISO 8601 datetime
+    - limit: Max frames to return (1-1000, default 100)
+    - offset: Number of frames to skip for pagination
+    """
+    query = select(CameraFrame).where(CameraFrame.device_key == device_key)
+
+    if start_time:
+        query = query.where(CameraFrame.timestamp >= start_time)
+    if end_time:
+        query = query.where(CameraFrame.timestamp <= end_time)
+
+    query = query.order_by(CameraFrame.timestamp.desc()).limit(limit).offset(offset)
+
+    result = await db.execute(query)
+    frames = result.scalars().all()
+
+    return frames
+
+
+@app.get("/api/cameras/{device_key}/frames/latest", response_model=CameraFrameResponse)
+async def get_latest_frame(
+    device_key: str,
+    db: AsyncSession = Depends(get_db),
+):
+    """Get the most recent frame for a camera."""
+    query = (
+        select(CameraFrame)
+        .where(CameraFrame.device_key == device_key)
+        .order_by(CameraFrame.timestamp.desc())
+        .limit(1)
+    )
+
+    result = await db.execute(query)
+    frame = result.scalar_one_or_none()
+
+    if not frame:
+        raise HTTPException(status_code=404, detail=f"No frames found for camera {device_key}")
+
+    return frame
+
+
+@app.get("/api/cameras/{device_key}/frames/{frame_id}/image")
+async def get_frame_image(
+    device_key: str,
+    frame_id: int,
+    db: AsyncSession = Depends(get_db),
+):
+    """Get the actual image file for a specific frame."""
+    query = select(CameraFrame).where(
+        CameraFrame.id == frame_id,
+        CameraFrame.device_key == device_key
+    )
+
+    result = await db.execute(query)
+    frame = result.scalar_one_or_none()
+
+    if not frame:
+        raise HTTPException(status_code=404, detail="Frame not found")
+
+    # Build full file path
+    full_path = os.path.join("/app", frame.file_path)
+
+    if not os.path.exists(full_path):
+        raise HTTPException(status_code=404, detail="Frame file not found on disk")
+
+    return FileResponse(
+        full_path,
+        media_type="image/webp",
+        filename=f"{device_key}_{frame.timestamp.strftime('%Y%m%d_%H%M%S')}.webp"
+    )
+
+
+@app.get("/api/cameras/{device_key}/frames/{frame_id}", response_model=CameraFrameResponse)
+async def get_frame_metadata(
+    device_key: str,
+    frame_id: int,
+    db: AsyncSession = Depends(get_db),
+):
+    """Get metadata for a specific frame."""
+    query = select(CameraFrame).where(
+        CameraFrame.id == frame_id,
+        CameraFrame.device_key == device_key
+    )
+
+    result = await db.execute(query)
+    frame = result.scalar_one_or_none()
+
+    if not frame:
+        raise HTTPException(status_code=404, detail="Frame not found")
+
+    return frame
+
+
+@app.post("/api/cameras/{device_key}/frames/capture", response_model=CameraFrameResponse)
+async def capture_frame_manual(
+    device_key: str,
+    db: AsyncSession = Depends(get_db),
+):
+    """Manually trigger frame capture for a specific camera."""
+    # Verify camera exists and is active
+    device_result = await db.execute(
+        select(Device).where(
+            Device.device_key == device_key,
+            Device.device_type == 'camera'
+        )
+    )
+    device = device_result.scalar_one_or_none()
+
+    if not device:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Camera {device_key} not found or not active"
+        )
+
+    # Capture frame
+    frame = await capture_frame_for_camera(device_key)
+
+    if not frame:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to capture frame for camera {device_key}"
+        )
+
+    return frame
+
+
+@app.get("/api/frames", response_model=List[CameraFrameResponse])
+async def get_all_frames(
+    start_time: Optional[datetime] = Query(None, description="Filter frames after this time"),
+    end_time: Optional[datetime] = Query(None, description="Filter frames before this time"),
+    device_key: Optional[str] = Query(None, description="Filter by camera device key"),
+    limit: int = Query(100, ge=1, le=1000, description="Maximum number of frames to return"),
+    offset: int = Query(0, ge=0, description="Number of frames to skip"),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Get frames from all cameras with optional filtering and pagination.
+
+    Query parameters:
+    - start_time: ISO 8601 datetime
+    - end_time: ISO 8601 datetime
+    - device_key: Specific camera to filter by
+    - limit: Max frames to return (1-1000, default 100)
+    - offset: Number of frames to skip for pagination
+    """
+    query = select(CameraFrame)
+
+    if device_key:
+        query = query.where(CameraFrame.device_key == device_key)
+    if start_time:
+        query = query.where(CameraFrame.timestamp >= start_time)
+    if end_time:
+        query = query.where(CameraFrame.timestamp <= end_time)
+
+    query = query.order_by(CameraFrame.timestamp.desc()).limit(limit).offset(offset)
+
+    result = await db.execute(query)
+    frames = result.scalars().all()
+
+    return frames
 
 
 if __name__ == "__main__":
