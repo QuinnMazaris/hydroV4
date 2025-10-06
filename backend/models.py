@@ -200,3 +200,15 @@ class CameraFrameCreate(BaseModel):
     file_size: Optional[int] = None
     width: Optional[int] = None
     height: Optional[int] = None
+
+
+class LatestMetricSnapshot(BaseModel):
+    metric_key: str
+    value: JsonValue
+    timestamp: datetime
+    unit: Optional[str] = None
+    display_name: Optional[str] = None
+
+
+class LatestReadingsResponse(BaseModel):
+    devices: Dict[str, List[LatestMetricSnapshot]]

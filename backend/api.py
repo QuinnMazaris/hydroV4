@@ -19,7 +19,8 @@ from .metrics import build_metric_meta
 from .models import (
     ActuatorBatchControl, ActuatorCommand, ActuatorControl,
     Device, DeviceResponse, Metric, Reading,
-    CameraFrame, CameraFrameResponse
+    CameraFrame, CameraFrameResponse,
+    LatestMetricSnapshot, LatestReadingsResponse,
 )
 from .mqtt_client import mqtt_client
 from .services.persistence import delete_old_readings, mark_devices_inactive
@@ -163,7 +164,7 @@ def _downsample_points(points: List[Dict[str, Any]], target: int) -> List[Dict[s
 
 async def _latest_metric_rows(
     db: AsyncSession,
-    device_key: Optional[str] = None,
+    device_keys: Optional[List[str]] = None,
     metric_keys: Optional[List[str]] = None,
 ):
     subquery = (
@@ -176,6 +177,8 @@ async def _latest_metric_rows(
         select(
             Device.device_key,
             Metric.metric_key,
+            Metric.display_name,
+            Metric.unit,
             Reading.timestamp,
             Reading.value,
         )
@@ -188,8 +191,8 @@ async def _latest_metric_rows(
         )
     )
 
-    if device_key:
-        query = query.where(Device.device_key == device_key)
+    if device_keys:
+        query = query.where(Device.device_key.in_(device_keys))
     if metric_keys:
         query = query.where(Metric.metric_key.in_(metric_keys))
 
@@ -316,6 +319,34 @@ async def build_initial_snapshot():
 
 
 # Device endpoints
+@app.get("/api/readings/latest", response_model=LatestReadingsResponse)
+async def get_latest_readings(
+    device_keys: Optional[str] = Query(
+        default=None,
+        description="Comma separated device_key list to filter",
+    ),
+    db: AsyncSession = Depends(get_db),
+):
+    keys = None
+    if device_keys:
+        keys = [key.strip() for key in device_keys.split(",") if key.strip()]
+
+    rows = await _latest_metric_rows(db, device_keys=keys)
+    devices: Dict[str, List[LatestMetricSnapshot]] = {}
+
+    for device_key, metric_key, display_name, unit, timestamp, value in rows:
+        snapshot = LatestMetricSnapshot(
+            metric_key=metric_key,
+            display_name=display_name,
+            unit=unit,
+            timestamp=timestamp,
+            value=value,
+        )
+        devices.setdefault(device_key, []).append(snapshot)
+
+    return LatestReadingsResponse(devices=devices)
+
+
 @app.get("/api/devices", response_model=List[DeviceResponse])
 async def get_devices(
     active_only: bool = True,

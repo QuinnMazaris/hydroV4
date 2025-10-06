@@ -41,6 +41,25 @@ services:
       retries: 3
       start_period: 40s
 
+  hydro-gardener:
+    build:
+      context: .
+      dockerfile: Dockerfile.gardener
+    container_name: hydro-gardener
+    network_mode: host
+    environment:
+      - GARDENER_HYDRO_API_BASE_URL=${GARDENER_HYDRO_API_BASE_URL:-http://127.0.0.1:${API_PORT:-8001}}
+      - GARDENER_API_PORT=${GARDENER_API_PORT:-8600}
+      - GARDENER_LLM_PROVIDER=${GARDENER_LLM_PROVIDER:-mock}
+      - GARDENER_OPENAI_API_KEY=${GARDENER_OPENAI_API_KEY:-}
+      - GARDENER_OPENAI_MODEL=${GARDENER_OPENAI_MODEL:-gpt-4o-mini}
+      - GARDENER_GROK_API_KEY=${GARDENER_GROK_API_KEY:-}
+      - GARDENER_GROK_MODEL=${GARDENER_GROK_MODEL:-grok-beta}
+      - GARDENER_ACTUATOR_DRY_RUN=${GARDENER_ACTUATOR_DRY_RUN:-false}
+      - GARDENER_REQUEST_LOG_SAMPLE_RATE=${GARDENER_REQUEST_LOG_SAMPLE_RATE:-1.0}
+    depends_on:
+      - hydro-app
+
 volumes:
   hydro-data:
     driver: local
