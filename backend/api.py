@@ -617,9 +617,9 @@ async def control_actuators_batch(
     batch: ActuatorBatchControl,
     db: AsyncSession = Depends(get_db),
 ):
-    """Batch actuator control with server-side deduplication and rate-limited MQTT publish."""
+    """Batch actuator control - ONLY works for actuators in MANUAL mode."""
     if not batch.commands:
-        return {"processed": 0, "skipped": 0, "missing": []}
+        return {"processed": 0, "skipped": 0, "missing": [], "blocked": []}
 
     deduped: Dict[tuple[str, str], ActuatorCommand] = {}
     for command in batch.commands:
@@ -637,30 +637,46 @@ async def control_actuators_batch(
         )
 
     if not deduped:
-        return {"processed": 0, "skipped": 0, "missing": []}
+        return {"processed": 0, "skipped": 0, "missing": [], "blocked": []}
 
     pairs = list(deduped.keys())
 
+    # Check which actuators exist and their control mode
     result = await db.execute(
-        select(Device.device_key, Metric.metric_key)
+        select(Device.device_key, Metric.metric_key, Metric.control_mode)
         .join(Metric, Metric.device_id == Device.id)
         .where(tuple_(Device.device_key, Metric.metric_key).in_(pairs))
         .where(Metric.metric_type == 'actuator')
     )
-    valid_pairs = {(device_key, metric_key) for device_key, metric_key in result.all()}
 
-    missing = [
-        {"device_id": device_id, "actuator_key": actuator_key}
-        for device_id, actuator_key in pairs
-        if (device_id, actuator_key) not in valid_pairs
-    ]
+    valid_pairs = {}
+    for device_key, metric_key, control_mode in result.all():
+        valid_pairs[(device_key, metric_key)] = control_mode or 'manual'
 
+    missing = []
+    blocked = []
+
+    # Categorize commands
+    for device_id, actuator_key in pairs:
+        if (device_id, actuator_key) not in valid_pairs:
+            missing.append({"device_id": device_id, "actuator_key": actuator_key})
+        elif valid_pairs[(device_id, actuator_key)] == 'auto':
+            blocked.append({
+                "device_id": device_id,
+                "actuator_key": actuator_key,
+                "reason": "Actuator is in AUTO mode"
+            })
+
+    # Only process MANUAL mode actuators
     device_commands: Dict[str, List[ActuatorControl]] = defaultdict(list)
     processed_details: List[Dict[str, Any]] = []
 
     for device_id, actuator_key in pairs:
         if (device_id, actuator_key) not in valid_pairs:
             continue
+        if valid_pairs[(device_id, actuator_key)] == 'auto':
+            continue  # Skip AUTO mode actuators
+
         command = deduped[(device_id, actuator_key)]
         control = ActuatorControl(actuator_key=command.actuator_key, state=command.state)
         device_commands[device_id].append(control)
@@ -670,6 +686,7 @@ async def control_actuators_batch(
             "state": command.state,
         })
 
+    # Publish to MQTT
     for device_id, controls in device_commands.items():
         await mqtt_client.publish_actuator_batch(device_id, controls)
 
@@ -677,7 +694,107 @@ async def control_actuators_batch(
         "processed": len(processed_details),
         "skipped": len(deduped) - len(processed_details),
         "missing": missing,
+        "blocked": blocked,
         "details": processed_details,
+    }
+
+
+@app.get("/api/actuators/modes")
+async def get_actuator_modes(
+    device_keys: Optional[str] = Query(default=None),
+    db: AsyncSession = Depends(get_db),
+):
+    """Get control modes for all actuators."""
+
+    query = (
+        select(Device.device_key, Metric.metric_key, Metric.control_mode)
+        .join(Metric, Metric.device_id == Device.id)
+        .where(Metric.metric_type == 'actuator')
+    )
+
+    if device_keys:
+        keys = [key.strip() for key in device_keys.split(",")]
+        query = query.where(Device.device_key.in_(keys))
+
+    result = await db.execute(query)
+
+    modes = {}
+    for device_key, metric_key, control_mode in result.all():
+        if device_key not in modes:
+            modes[device_key] = {}
+        modes[device_key][metric_key] = control_mode or 'manual'
+
+    return {"modes": modes}
+
+
+@app.post("/api/actuators/mode/global")
+async def set_global_control_mode(
+    mode: str = Query(..., regex="^(manual|auto)$"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Set all actuators to manual or auto mode globally."""
+
+    result = await db.execute(
+        select(Metric).where(Metric.metric_type == 'actuator')
+    )
+    actuators = result.scalars().all()
+
+    updated_count = 0
+    for actuator in actuators:
+        actuator.control_mode = mode
+        updated_count += 1
+
+    await db.commit()
+
+    # Broadcast mode change event
+    await event_broker.publish({
+        "type": "global_mode_changed",
+        "mode": mode,
+        "updated_count": updated_count,
+        "timestamp": utc_now().timestamp()
+    })
+
+    print(f"Global mode changed to {mode.upper()} ({updated_count} actuators)")
+
+    return {"mode": mode, "updated_actuators": updated_count}
+
+
+@app.post("/api/actuators/{device_key}/{actuator_key}/mode")
+async def set_actuator_mode(
+    device_key: str,
+    actuator_key: str,
+    mode: str = Query(..., regex="^(manual|auto)$"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Set control mode for a specific actuator (for future use)."""
+
+    result = await db.execute(
+        select(Metric)
+        .join(Device, Device.id == Metric.device_id)
+        .where(Device.device_key == device_key)
+        .where(Metric.metric_key == actuator_key)
+        .where(Metric.metric_type == 'actuator')
+    )
+    metric = result.scalar_one_or_none()
+
+    if not metric:
+        raise HTTPException(status_code=404, detail="Actuator not found")
+
+    metric.control_mode = mode
+    await db.commit()
+
+    await event_broker.publish({
+        "type": "control_mode_changed",
+        "device_key": device_key,
+        "actuator_key": actuator_key,
+        "mode": mode,
+        "timestamp": utc_now().timestamp()
+    })
+
+    return {
+        "device_key": device_key,
+        "actuator_key": actuator_key,
+        "control_mode": mode
     }
 
 

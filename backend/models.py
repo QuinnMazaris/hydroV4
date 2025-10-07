@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Literal, Optional, Union
 
 from sqlalchemy import (
     JSON,
@@ -53,6 +53,7 @@ class Metric(Base):
     display_name = Column(String(200), nullable=True)
     unit = Column(String(50), nullable=True)
     metric_type = Column(String(20), nullable=False)  # 'sensor' or 'actuator'
+    control_mode = Column(String(20), default='manual', nullable=True)  # 'manual' or 'auto' (NULL for sensors)
     created_at = Column(DateTime(timezone=True), default=utc_now, nullable=False)
 
     device = relationship("Device", back_populates="metrics")
@@ -115,6 +116,8 @@ class MetricBase(BaseModel):
     metric_key: str
     display_name: Optional[str] = None
     unit: Optional[str] = None
+    metric_type: str = Field(default='sensor')
+    control_mode: Optional[Literal['manual', 'auto']] = 'manual'
 
 
 class MetricCreate(MetricBase):

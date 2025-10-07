@@ -13,6 +13,7 @@ import { useWsSensors } from "@/hooks/use-ws-metrics"
 import { DeviceToggle } from "@/components/device-toggle"
 import { CameraFeed } from "@/components/camera-feed"
 import { useCameras } from "@/hooks/use-cameras"
+import { cn } from "@/lib/utils"
 
 interface MetricCardProps {
   title: string
@@ -116,6 +117,10 @@ export default function Dashboard() {
   const OPTIMISTIC_TIMEOUT_MS = 5_000  // Max time to wait for confirmation before reverting
 
   const [optimisticActuatorStates, setOptimisticActuatorStates] = useState<Record<string, OptimisticEntry>>({})
+
+  // Global control mode state
+  const [globalMode, setGlobalMode] = useState<'auto' | 'manual'>('manual')
+  const [controlModes, setControlModes] = useState<Record<string, Record<string, 'auto' | 'manual'>>>({})
 
   type PendingActuatorRequest = {
     deviceId: string
@@ -242,10 +247,74 @@ export default function Dashboard() {
 
   const recentErrors = useMemo(() => errors.slice(-5).reverse(), [errors])
 
+  // Fetch control modes on mount
+  useEffect(() => {
+    fetch('/api/actuators/modes')
+      .then(res => res.json())
+      .then(data => {
+        setControlModes(data.modes || {})
+
+        // Determine global mode based on actuators
+        const allModes = Object.values(data.modes || {}).flatMap(device => Object.values(device))
+        if (allModes.length > 0) {
+          const allAuto = allModes.every((mode: string) => mode === 'auto')
+          setGlobalMode(allAuto ? 'auto' : 'manual')
+        }
+      })
+      .catch(err => console.error('Failed to fetch control modes:', err))
+  }, [])
+
+  // Global mode toggle handler
+  const handleGlobalModeToggle = async () => {
+    const newMode = globalMode === 'manual' ? 'auto' : 'manual'
+
+    if (newMode === 'auto') {
+      const confirmed = window.confirm(
+        'Switch to AUTO mode?\n\nAutomation will take control of all relays based on configured rules.'
+      )
+      if (!confirmed) return
+    }
+
+    try {
+      const res = await fetch(`/api/actuators/mode/global?mode=${newMode}`, {
+        method: 'POST'
+      })
+
+      if (res.ok) {
+        setGlobalMode(newMode)
+
+        // Update all control modes locally
+        setControlModes(prev => {
+          const updated = { ...prev }
+          Object.keys(updated).forEach(deviceKey => {
+            Object.keys(updated[deviceKey]).forEach(actuatorKey => {
+              updated[deviceKey][actuatorKey] = newMode
+            })
+          })
+          return updated
+        })
+
+        console.log(`Switched to ${newMode.toUpperCase()} mode`)
+      } else {
+        throw new Error('Failed to change mode')
+      }
+    } catch (error) {
+      console.error('Error changing mode:', error)
+      alert('Failed to change control mode')
+    }
+  }
+
   const handleActuatorToggle = (deviceId: string, actuator: ActuatorInfo) => {
-    console.log('🔄 Toggle clicked:', { deviceId, actuator })
+    console.log('Toggle clicked:', { deviceId, actuator })
     if (!actuator || !actuator.key) {
       console.warn('Invalid actuator', deviceId, actuator)
+      return
+    }
+
+    // Check if actuator is in AUTO mode
+    const mode = controlModes[deviceId]?.[actuator.key] || 'manual'
+    if (mode === 'auto') {
+      alert('This actuator is in AUTO mode.\n\nSwitch to MANUAL mode to control it manually.')
       return
     }
 
@@ -423,6 +492,38 @@ export default function Dashboard() {
         </header>
 
         <div className="container mx-auto flex-1 px-6 py-8">
+          {/* Global Control Mode Toggle */}
+          <Card className="mb-6 border-white/10 bg-black/55 backdrop-blur-xl">
+            <CardHeader>
+              <div className="flex items-center justify-between">
+                <div className="flex-1">
+                  <CardTitle className="text-xl">
+                    Current Mode: <span className={globalMode === 'auto' ? 'text-blue-400' : 'text-gray-400'}>
+                      {globalMode === 'auto' ? 'AUTOMATIC' : 'MANUAL'}
+                    </span>
+                  </CardTitle>
+                  <p className="text-sm text-muted-foreground mt-1">
+                    {globalMode === 'auto'
+                      ? 'All relays are controlled by automation rules'
+                      : 'You have direct control of all relays'}
+                  </p>
+                </div>
+
+                <button
+                  onClick={handleGlobalModeToggle}
+                  className={cn(
+                    "px-6 py-3 rounded-lg font-semibold transition-all duration-200",
+                    globalMode === 'auto'
+                      ? "bg-gray-600 hover:bg-gray-700 text-white"
+                      : "bg-blue-600 hover:bg-blue-700 text-white"
+                  )}
+                >
+                  {globalMode === 'auto' ? 'Switch to Manual' : 'Switch to Auto'}
+                </button>
+              </div>
+            </CardHeader>
+          </Card>
+
           {/* Camera Feeds - Dynamically loaded from MediaMTX */}
           <div className="mb-8 space-y-4">
             {cameraError && (
@@ -487,14 +588,27 @@ export default function Dashboard() {
                       const isOn = actuator.currentState === 'on'
                       const label = actuator.label || actuator.key
 
+                      // Get control mode for this actuator
+                      const mode = controlModes[deviceId]?.[actuator.key] || 'manual'
+                      const isAutoMode = mode === 'auto'
+
                       return (
-                        <DeviceToggle
-                          key={busyKey}
-                          id={busyKey}
-                          label={label}
-                          checked={isOn}
-                          onToggle={() => handleActuatorToggle(deviceId, actuator)}
-                        />
+                        <div key={busyKey} className="relative">
+                          <div className={cn(isAutoMode && "opacity-60")}>
+                            <DeviceToggle
+                              id={busyKey}
+                              label={label}
+                              checked={isOn}
+                              onToggle={() => handleActuatorToggle(deviceId, actuator)}
+                            />
+                          </div>
+
+                          {isAutoMode && (
+                            <div className="absolute top-2 left-2 px-2 py-1 bg-blue-500 rounded text-xs font-bold text-white">
+                              AUTO
+                            </div>
+                          )}
+                        </div>
                       )
                     })}
                   </div>

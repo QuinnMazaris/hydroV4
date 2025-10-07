@@ -1,0 +1,91 @@
+{
+  "version": "1.0",
+  "rules": [
+    {
+      "id": "example-light-schedule",
+      "name": "Example Light Schedule",
+      "description": "Turn lights on during the day (example rule - disabled by default)",
+      "enabled": false,
+      "priority": 100,
+      "conditions": {
+        "all_of": [
+          {
+            "type": "time_range",
+            "start_time": "06:00",
+            "end_time": "22:00",
+            "timezone": "America/Los_Angeles"
+          },
+          {
+            "type": "days_of_week",
+            "days": ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
+          }
+        ]
+      },
+      "actions": [
+        {
+          "type": "set_actuator",
+          "device_key": "hydro-station-1",
+          "actuator_key": "relay1",
+          "state": "on"
+        }
+      ]
+    },
+    {
+      "id": "example-temperature-control",
+      "name": "Example Temperature Control",
+      "description": "Turn on fan if temperature exceeds 28°C (example rule - disabled by default)",
+      "enabled": false,
+      "priority": 200,
+      "conditions": {
+        "all_of": [
+          {
+            "type": "sensor_threshold",
+            "device_key": "hydro-station-1",
+            "metric_key": "temperature",
+            "operator": "greater_than",
+            "value": 28.0
+          }
+        ]
+      },
+      "actions": [
+        {
+          "type": "set_actuator",
+          "device_key": "hydro-station-1",
+          "actuator_key": "relay2",
+          "state": "on"
+        }
+      ]
+    },
+    {
+      "id": "example-water-level-low",
+      "name": "Example Low Water Level Alert",
+      "description": "Turn on pump if water level is low (example rule - disabled by default)",
+      "enabled": false,
+      "priority": 300,
+      "conditions": {
+        "all_of": [
+          {
+            "type": "sensor_threshold",
+            "device_key": "hydro-station-1",
+            "metric_key": "water_level",
+            "operator": "less_than",
+            "value": 20.0
+          }
+        ]
+      },
+      "actions": [
+        {
+          "type": "set_actuator",
+          "device_key": "hydro-station-1",
+          "actuator_key": "relay3",
+          "state": "on"
+        }
+      ]
+    }
+  ],
+  "metadata": {
+    "created_at": "2025-10-07T00:00:00Z",
+    "last_modified": "2025-10-07T00:00:00Z",
+    "modified_by": "system"
+  }
+}

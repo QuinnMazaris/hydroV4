@@ -191,6 +191,58 @@ class HydroAPIClient:
         response.raise_for_status()
         return response.json()
 
+    async def get_actuator_modes(
+        self,
+        *,
+        device_keys: Optional[List[str]] = None,
+    ) -> Dict[str, Dict[str, str]]:
+        """Get control modes for all actuators.
+
+        Args:
+            device_keys: Optional list of device keys to filter
+
+        Returns:
+            Dict mapping device_key -> actuator_key -> mode ('manual' or 'auto')
+        """
+        params: Dict[str, Any] = {}
+        if device_keys:
+            params["device_keys"] = ",".join(device_keys)
+
+        response = await self._client.get("/api/actuators/modes", params=params)
+        response.raise_for_status()
+        payload = response.json()
+        return payload.get("modes", {})
+
+    async def control_actuator(
+        self,
+        device_key: str,
+        actuator_key: str,
+        state: str,
+    ) -> bool:
+        """Control a single actuator.
+
+        Args:
+            device_key: Device identifier
+            actuator_key: Actuator/metric key
+            state: Desired state (e.g., 'on', 'off')
+
+        Returns:
+            True if successful, False otherwise
+        """
+        commands = [
+            {
+                "device_id": device_key,
+                "actuator_key": actuator_key,
+                "state": state,
+            }
+        ]
+
+        result = await self.control_actuators(commands)
+
+        # Check if command was processed successfully
+        processed = result.get("processed", 0)
+        return processed > 0
+
 
 @asynccontextmanager
 async def hydro_client(**kwargs: Any):
