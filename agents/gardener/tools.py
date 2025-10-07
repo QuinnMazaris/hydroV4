@@ -102,21 +102,70 @@ class ToolRegistry:
                     },
                     handler=self._handle_control_actuators,
                 ),
-                "capture_camera_frame": ToolSpec(
-                    name="capture_camera_frame",
+                "get_camera_image": ToolSpec(
+                    name="get_camera_image",
                     description=(
-                        "Capture a fresh still image from a camera device. "
-                        f"Current active cameras: {camera_listing}."
+                        "Get camera image (latest by default, or historical). "
+                        f"Current active cameras: {camera_listing}. "
+                        "Images are auto-captured every 5 minutes."
                     ),
                     input_schema={
                         "type": "object",
                         "properties": {
-                            "device_key": {"type": "string", "description": "Camera device_key"}
+                            "device_key": {
+                                "type": "string",
+                                "description": "Camera device_key"
+                            },
+                            "days_ago": {
+                                "type": "integer",
+                                "description": "Get image from N days ago (0 = latest, max 30)",
+                                "minimum": 0,
+                                "maximum": 30,
+                                "default": 0
+                            }
                         },
                         "required": ["device_key"],
                         "additionalProperties": False,
                     },
-                    handler=self._handle_capture_camera,
+                    handler=self._handle_get_camera_image,
+                ),
+                "get_historical_readings": ToolSpec(
+                    name="get_historical_readings",
+                    description=(
+                        "Get historical sensor readings over a time range. "
+                        "Useful for analyzing trends, comparing conditions, or reviewing past data."
+                    ),
+                    input_schema={
+                        "type": "object",
+                        "properties": {
+                            "device_keys": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "List of device_keys to filter (optional)"
+                            },
+                            "metric_keys": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "List of metric_keys to filter, e.g. ['temperature', 'humidity'] (optional)"
+                            },
+                            "hours": {
+                                "type": "integer",
+                                "description": "Number of hours of history (default 24, max 720 = 30 days)",
+                                "minimum": 1,
+                                "maximum": 720,
+                                "default": 24
+                            },
+                            "limit": {
+                                "type": "integer",
+                                "description": "Max data points to return (default 1000, max 10000)",
+                                "minimum": 1,
+                                "maximum": 10000,
+                                "default": 1000
+                            }
+                        },
+                        "additionalProperties": False,
+                    },
+                    handler=self._handle_historical_readings,
                 ),
                 "list_devices": ToolSpec(
                     name="list_devices",
@@ -141,9 +190,23 @@ class ToolRegistry:
         result = await self._client.control_actuators(commands)
         return result
 
-    async def _handle_capture_camera(self, args: Dict[str, Any]) -> Dict[str, Any]:
+    async def _handle_get_camera_image(self, args: Dict[str, Any]) -> Dict[str, Any]:
         device_key = args["device_key"]
-        result = await self._client.capture_camera(device_key)
+        days_ago = args.get("days_ago", 0)
+        result = await self._client.get_camera_image(device_key, days_ago=days_ago)
+        return result
+
+    async def _handle_historical_readings(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        device_keys = args.get("device_keys")
+        metric_keys = args.get("metric_keys")
+        hours = args.get("hours", 24)
+        limit = args.get("limit", 1000)
+        result = await self._client.get_historical_readings(
+            device_keys=device_keys,
+            metric_keys=metric_keys,
+            hours=hours,
+            limit=limit,
+        )
         return result
 
     async def _handle_list_devices(self, _: Dict[str, Any]) -> Dict[str, Any]:

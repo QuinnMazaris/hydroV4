@@ -21,6 +21,7 @@ from .models import (
     Device, DeviceResponse, Metric, Reading,
     CameraFrame, CameraFrameResponse,
     LatestMetricSnapshot, LatestReadingsResponse,
+    HistoricalReading, HistoricalReadingsResponse,
 )
 from .mqtt_client import mqtt_client
 from .services.persistence import delete_old_readings, mark_devices_inactive
@@ -345,6 +346,90 @@ async def get_latest_readings(
         devices.setdefault(device_key, []).append(snapshot)
 
     return LatestReadingsResponse(devices=devices)
+
+
+@app.get("/api/readings/historical", response_model=HistoricalReadingsResponse)
+async def get_historical_readings(
+    device_keys: Optional[str] = Query(
+        default=None,
+        description="Comma separated device_key list to filter",
+    ),
+    metric_keys: Optional[str] = Query(
+        default=None,
+        description="Comma separated metric_key list to filter",
+    ),
+    hours: int = Query(
+        default=24,
+        ge=1,
+        le=720,
+        description="Number of hours of history to retrieve (max 30 days)",
+    ),
+    limit: int = Query(
+        default=1000,
+        ge=1,
+        le=10000,
+        description="Maximum number of data points to return",
+    ),
+    db: AsyncSession = Depends(get_db),
+):
+    """Get historical sensor readings over a time range."""
+    # Calculate time range
+    end_time = datetime.utcnow()
+    start_time = end_time - timedelta(hours=hours)
+
+    # Parse filter lists
+    device_key_list = None
+    if device_keys:
+        device_key_list = [key.strip() for key in device_keys.split(",") if key.strip()]
+
+    metric_key_list = None
+    if metric_keys:
+        metric_key_list = [key.strip() for key in metric_keys.split(",") if key.strip()]
+
+    # Build query
+    query = (
+        select(
+            Device.device_key,
+            Metric.metric_key,
+            Metric.display_name,
+            Metric.unit,
+            Reading.timestamp,
+            Reading.value,
+        )
+        .join(Metric, Metric.device_id == Device.id)
+        .join(Reading, Reading.metric_id == Metric.id)
+        .where(Reading.timestamp >= start_time)
+        .where(Reading.timestamp <= end_time)
+        .order_by(Reading.timestamp.desc())
+        .limit(limit)
+    )
+
+    if device_key_list:
+        query = query.where(Device.device_key.in_(device_key_list))
+    if metric_key_list:
+        query = query.where(Metric.metric_key.in_(metric_key_list))
+
+    result = await db.execute(query)
+    rows = result.all()
+
+    # Group by device
+    devices: Dict[str, List[HistoricalReading]] = {}
+    for device_key, metric_key, display_name, unit, timestamp, value in rows:
+        reading = HistoricalReading(
+            metric_key=metric_key,
+            display_name=display_name,
+            unit=unit,
+            timestamp=timestamp,
+            value=value,
+        )
+        devices.setdefault(device_key, []).append(reading)
+
+    return HistoricalReadingsResponse(
+        devices=devices,
+        start_time=start_time,
+        end_time=end_time,
+        total_points=len(rows),
+    )
 
 
 @app.get("/api/devices", response_model=List[DeviceResponse])

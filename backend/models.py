@@ -212,3 +212,18 @@ class LatestMetricSnapshot(BaseModel):
 
 class LatestReadingsResponse(BaseModel):
     devices: Dict[str, List[LatestMetricSnapshot]]
+
+
+class HistoricalReading(BaseModel):
+    metric_key: str
+    value: JsonValue
+    timestamp: datetime
+    unit: Optional[str] = None
+    display_name: Optional[str] = None
+
+
+class HistoricalReadingsResponse(BaseModel):
+    devices: Dict[str, List[HistoricalReading]]
+    start_time: datetime
+    end_time: datetime
+    total_points: int

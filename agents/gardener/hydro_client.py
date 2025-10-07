@@ -160,6 +160,27 @@ class HydroAPIClient:
         response.raise_for_status()
         return {"status": "unknown"}
 
+    async def get_historical_readings(
+        self,
+        *,
+        device_keys: Optional[List[str]] = None,
+        metric_keys: Optional[List[str]] = None,
+        hours: int = 24,
+        limit: int = 1000,
+    ) -> Dict[str, Any]:
+        params: Dict[str, Any] = {
+            "hours": hours,
+            "limit": limit,
+        }
+        if device_keys:
+            params["device_keys"] = ",".join(device_keys)
+        if metric_keys:
+            params["metric_keys"] = ",".join(metric_keys)
+
+        response = await self._client.get("/api/readings/historical", params=params)
+        response.raise_for_status()
+        return response.json()
+
 
 @asynccontextmanager
 async def hydro_client(**kwargs: Any):
