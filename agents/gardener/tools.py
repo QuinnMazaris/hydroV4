@@ -132,8 +132,11 @@ class ToolRegistry:
                 "get_historical_readings": ToolSpec(
                     name="get_historical_readings",
                     description=(
-                        "Get historical sensor readings over a time range. "
-                        "Useful for analyzing trends, comparing conditions, or reviewing past data."
+                        "Get historical sensor readings with automatic downsampling and statistics. "
+                        "Returns both time-series data AND summary stats (min/max/avg/change) for each metric. "
+                        "Auto-downsamples to prevent token overflow: <1h=raw, 1-6h=1min avg, 6-24h=5min avg, 24h+=15min avg. "
+                        "Use 'statistics' field to quickly identify trends/events (e.g. water fills, temp spikes). "
+                        "Use 'devices' field for detailed time-series when needed."
                     ),
                     input_schema={
                         "type": "object",
@@ -157,10 +160,21 @@ class ToolRegistry:
                             },
                             "limit": {
                                 "type": "integer",
-                                "description": "Max data points to return (default 1000, max 10000)",
+                                "description": "Max data points per metric (default 100, max 1000). Higher = more detail but more tokens.",
                                 "minimum": 1,
-                                "maximum": 10000,
-                                "default": 1000
+                                "maximum": 1000,
+                                "default": 100
+                            },
+                            "downsample_minutes": {
+                                "type": "integer",
+                                "description": "Downsample interval in minutes (optional, auto-calculated if not set)",
+                                "minimum": 1,
+                                "maximum": 1440
+                            },
+                            "include_stats": {
+                                "type": "boolean",
+                                "description": "Include summary statistics (default true). Recommended: always true.",
+                                "default": True
                             }
                         },
                         "additionalProperties": False,
@@ -194,18 +208,35 @@ class ToolRegistry:
         device_key = args["device_key"]
         days_ago = args.get("days_ago", 0)
         result = await self._client.get_camera_image(device_key, days_ago=days_ago)
+
+        # Return MCP-formatted content for image display
+        if result.get("status") == "success" and "image_data" in result:
+            return {
+                "content": [
+                    {
+                        "type": "image",
+                        "data": result["image_data"],
+                        "mimeType": result.get("content_type", "image/webp")
+                    }
+                ],
+                "isError": False
+            }
         return result
 
     async def _handle_historical_readings(self, args: Dict[str, Any]) -> Dict[str, Any]:
         device_keys = args.get("device_keys")
         metric_keys = args.get("metric_keys")
         hours = args.get("hours", 24)
-        limit = args.get("limit", 1000)
+        limit = args.get("limit", 100)
+        downsample_minutes = args.get("downsample_minutes")
+        include_stats = args.get("include_stats", True)
         result = await self._client.get_historical_readings(
             device_keys=device_keys,
             metric_keys=metric_keys,
             hours=hours,
             limit=limit,
+            downsample_minutes=downsample_minutes,
+            include_stats=include_stats,
         )
         return result
 

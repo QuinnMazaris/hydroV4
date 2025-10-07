@@ -1,6 +1,7 @@
 """Async client for interacting with the hydro backend API."""
 from __future__ import annotations
 
+import base64
 import json
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -150,12 +151,16 @@ class HydroAPIClient:
     async def get_camera_image(self, device_key: str, *, days_ago: int = 0) -> Dict[str, Any]:
         params = {"days_ago": days_ago}
         response = await self._client.get(f"/api/cameras/{device_key}/image", params=params)
-        # API returns file response; keep metadata minimal to avoid streaming binary in tests
         if response.status_code == 200:
+            image_bytes = response.content
+            image_base64 = base64.b64encode(image_bytes).decode('utf-8')
+            content_type = response.headers.get("content-type", "image/webp")
+
             return {
                 "status": "success",
-                "content_type": response.headers.get("content-type"),
+                "content_type": content_type,
                 "content_length": response.headers.get("content-length"),
+                "image_data": f"data:{content_type};base64,{image_base64}"
             }
         response.raise_for_status()
         return {"status": "unknown"}
@@ -166,16 +171,21 @@ class HydroAPIClient:
         device_keys: Optional[List[str]] = None,
         metric_keys: Optional[List[str]] = None,
         hours: int = 24,
-        limit: int = 1000,
+        limit: int = 100,
+        downsample_minutes: Optional[int] = None,
+        include_stats: bool = True,
     ) -> Dict[str, Any]:
         params: Dict[str, Any] = {
             "hours": hours,
             "limit": limit,
+            "include_stats": str(include_stats).lower(),
         }
         if device_keys:
             params["device_keys"] = ",".join(device_keys)
         if metric_keys:
             params["metric_keys"] = ",".join(metric_keys)
+        if downsample_minutes is not None:
+            params["downsample_minutes"] = downsample_minutes
 
         response = await self._client.get("/api/readings/historical", params=params)
         response.raise_for_status()

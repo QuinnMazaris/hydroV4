@@ -9,6 +9,7 @@ from loguru import logger
 from ..database import AsyncSessionLocal
 from ..models import Device, JsonValue, Metric, Reading
 from ..events import event_broker
+from ..utils.time import ensure_utc, epoch_millis, utc_now
 
 
 async def upsert_device(
@@ -20,7 +21,7 @@ async def upsert_device(
     device_type: str = 'mqtt_sensor',
 ) -> Device:
     """Insert a new device or refresh an existing one."""
-    touch_time = last_seen or datetime.utcnow()
+    touch_time = ensure_utc(last_seen) if last_seen else utc_now()
     async with AsyncSessionLocal() as session:
         result = await session.execute(
             select(Device).where(Device.device_key == device_key)
@@ -59,7 +60,7 @@ async def upsert_device(
                 'type': 'device',
                 'device_id': device.device_key,
                 'is_active': device.is_active,
-                'last_seen': int(device.last_seen.timestamp() * 1000) if device.last_seen else None,
+                'last_seen': epoch_millis(device.last_seen) if device.last_seen else None,
             })
         except Exception as e:
             logger.debug(f"Failed to publish device event for {device.device_key}: {e}")
@@ -150,7 +151,7 @@ async def insert_reading(
     """Persist a single metric reading."""
     reading = Reading(
         metric_id=metric_id,
-        timestamp=timestamp or datetime.utcnow(),
+        timestamp=ensure_utc(timestamp) if timestamp else utc_now(),
         value=value,
     )
     async with AsyncSessionLocal() as session:

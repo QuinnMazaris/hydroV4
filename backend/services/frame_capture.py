@@ -2,8 +2,7 @@
 
 import asyncio
 import os
-from datetime import datetime, timedelta
-from pathlib import Path
+from datetime import timedelta
 from typing import Dict, List, Optional
 
 import httpx
@@ -13,6 +12,7 @@ from sqlalchemy import delete, select
 from ..config import settings
 from ..database import AsyncSessionLocal
 from ..models import CameraFrame
+from ..utils.time import utc_now
 
 
 def get_mediamtx_rtsp_url(path_name: str) -> str:
@@ -178,7 +178,7 @@ async def save_frame_to_db(
         async with AsyncSessionLocal() as db:
             frame = CameraFrame(
                 device_key=device_key,
-                timestamp=datetime.utcnow(),
+                timestamp=utc_now(),
                 file_path=file_path,
                 file_size=file_size,
                 width=width,
@@ -205,7 +205,7 @@ async def capture_frame_for_camera(camera_name: str) -> Optional[CameraFrame]:
         CameraFrame record or None on failure
     """
     # Generate output path with timestamp
-    now = datetime.utcnow()
+    now = utc_now()
     date_dir = now.strftime("%Y-%m-%d")
     timestamp_str = now.strftime("%H-%M-%S")
 
@@ -294,7 +294,7 @@ async def cleanup_old_frames():
         return  # Retention disabled
 
     try:
-        cutoff = datetime.utcnow() - timedelta(days=settings.frame_retention_days)
+        cutoff = utc_now() - timedelta(days=settings.frame_retention_days)
 
         async with AsyncSessionLocal() as db:
             # Get old frames to delete

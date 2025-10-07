@@ -18,6 +18,8 @@ from sqlalchemy.orm import relationship
 
 from pydantic import BaseModel, Field
 
+from .utils.time import utc_now
+
 Base = declarative_base()
 
 
@@ -28,11 +30,11 @@ class Device(Base):
     device_key = Column(String(100), unique=True, index=True, nullable=False)
     name = Column(String(200), nullable=True)
     description = Column(Text, nullable=True)
-    last_seen = Column(DateTime, default=datetime.utcnow, nullable=False)
+    last_seen = Column(DateTime(timezone=True), default=utc_now, nullable=False)
     is_active = Column(Boolean, default=True, nullable=False)
     device_type = Column(String(50), default='mqtt_sensor', nullable=False)  # 'mqtt_sensor', 'camera', etc
     device_metadata = Column(Text, nullable=True)  # JSON string for device-specific data
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime(timezone=True), default=utc_now, nullable=False)
 
     metrics = relationship(
         "Metric",
@@ -51,7 +53,7 @@ class Metric(Base):
     display_name = Column(String(200), nullable=True)
     unit = Column(String(50), nullable=True)
     metric_type = Column(String(20), nullable=False)  # 'sensor' or 'actuator'
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime(timezone=True), default=utc_now, nullable=False)
 
     device = relationship("Device", back_populates="metrics")
     readings = relationship(
@@ -72,7 +74,7 @@ class Reading(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     metric_id = Column(Integer, ForeignKey("metrics.id", ondelete="CASCADE"), nullable=False)
-    timestamp = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+    timestamp = Column(DateTime(timezone=True), default=utc_now, nullable=False, index=True)
     value = Column(JSON, nullable=False)
 
     metric = relationship("Metric", back_populates="readings")
@@ -162,12 +164,12 @@ class CameraFrame(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     device_key = Column(String(100), nullable=False, index=True)
-    timestamp = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+    timestamp = Column(DateTime(timezone=True), default=utc_now, nullable=False, index=True)
     file_path = Column(String(500), nullable=False)
     file_size = Column(Integer, nullable=True)
     width = Column(Integer, nullable=True)
     height = Column(Integer, nullable=True)
-    analyzed_at = Column(DateTime, nullable=True, index=True)
+    analyzed_at = Column(DateTime(timezone=True), nullable=True, index=True)
     analysis_model = Column(String(100), nullable=True)
     detected_objects = Column(JSON, nullable=True)
     plant_health_score = Column(Integer, nullable=True)
@@ -222,8 +224,27 @@ class HistoricalReading(BaseModel):
     display_name: Optional[str] = None
 
 
+class MetricStatistics(BaseModel):
+    metric_key: str
+    display_name: Optional[str] = None
+    unit: Optional[str] = None
+    count: int
+    min: JsonValue
+    max: JsonValue
+    avg: Optional[float] = None
+    first_value: JsonValue
+    last_value: JsonValue
+    first_timestamp: datetime
+    last_timestamp: datetime
+    change: Optional[float] = None
+    change_percent: Optional[float] = None
+
+
 class HistoricalReadingsResponse(BaseModel):
     devices: Dict[str, List[HistoricalReading]]
     start_time: datetime
     end_time: datetime
     total_points: int
+    returned_points: int
+    aggregated: bool = False
+    statistics: Optional[Dict[str, List[MetricStatistics]]] = None

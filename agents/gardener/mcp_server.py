@@ -39,12 +39,31 @@ def create_server(registry: ToolRegistry) -> Server:
     async def call_tool(name: str, arguments: Dict[str, Any]):
         tool = registry.get(name)
         if not tool:
-            return {"error": f"Tool '{name}' is not registered"}
+            return [types.TextContent(type="text", text=f"Tool '{name}' is not registered")]
 
         result = await tool.handler(arguments)
-        # Ensure result is JSON serializable for MCP consumers
-        json.dumps(result)
-        return result
+
+        # Handle MCP-formatted content responses (e.g., images)
+        if isinstance(result, dict) and "content" in result:
+            content_list = []
+            for item in result["content"]:
+                if item.get("type") == "image":
+                    content_list.append(
+                        types.ImageContent(
+                            type="image",
+                            data=item["data"],
+                            mimeType=item.get("mimeType", "image/webp")
+                        )
+                    )
+                elif item.get("type") == "text":
+                    content_list.append(
+                        types.TextContent(type="text", text=item.get("text", ""))
+                    )
+            return content_list
+
+        # Default: return result as JSON text
+        json_result = json.dumps(result, indent=2)
+        return [types.TextContent(type="text", text=json_result)]
 
     return server
 

@@ -22,6 +22,7 @@ from .services.persistence import (
     sync_device_metrics,
     upsert_device,
 )
+from .utils.time import ensure_utc, epoch_millis, utc_now
 
 class MQTTClient:
     def __init__(self):
@@ -209,7 +210,7 @@ class MQTTClient:
         last_seen: Optional[datetime] = None,
     ) -> Device:
         """Ensure a device record exists and refresh last_seen metadata."""
-        current_time = last_seen or datetime.utcnow()
+        current_time = ensure_utc(last_seen) if last_seen else utc_now()
         device = await self._ensure_device_record(
             device_key,
             name=name,
@@ -273,7 +274,7 @@ class MQTTClient:
                 'type': 'device',
                 'device_id': device.device_key,
                 'is_active': device.is_active,
-                'last_seen': int(device.last_seen.timestamp() * 1000) if device.last_seen else None,
+                'last_seen': epoch_millis(device.last_seen) if device.last_seen else None,
                 'sensors': sensors,
                 'actuators': actuators,
             }
@@ -363,7 +364,7 @@ class MQTTClient:
             'code': code,
             'message': message,
             'context': context or {},
-            'ts': int(datetime.utcnow().timestamp() * 1000),
+            'ts': epoch_millis(utc_now()),
         }
         try:
             await event_broker.publish(event)
@@ -519,7 +520,7 @@ class MQTTClient:
                 )
                 return
 
-            timestamp = datetime.utcnow()
+            timestamp = utc_now()
             device = await self._touch_device(device_id, last_seen=timestamp)
 
             for sensor_name, value in sensors.items():
@@ -552,7 +553,7 @@ class MQTTClient:
             await event_broker.publish({
                 'type': 'reading',
                 'device_id': device_id,
-                'timestamp': int(timestamp.timestamp() * 1000),
+                'timestamp': epoch_millis(timestamp),
                 'sensors': sensors,
             })
 
@@ -590,7 +591,7 @@ class MQTTClient:
             if not relay_values:
                 return
 
-            timestamp = datetime.utcnow()
+            timestamp = utc_now()
             device = await self._touch_device(device_id, last_seen=timestamp)
             metric_map = await get_metric_map(device_id)
 
@@ -637,7 +638,7 @@ class MQTTClient:
             await event_broker.publish({
                 'type': 'reading',
                 'device_id': device_id,
-                'timestamp': int(timestamp.timestamp() * 1000),
+                'timestamp': epoch_millis(timestamp),
                 'actuators': relay_values,
             })
 
@@ -689,7 +690,7 @@ class MQTTClient:
                 else:
                     state_value = state_label
 
-            timestamp = datetime.utcnow()
+            timestamp = utc_now()
             device = await self._touch_device(device_id, last_seen=timestamp)
             metric_map = await get_metric_map(device_id)
 
@@ -729,7 +730,7 @@ class MQTTClient:
             await event_broker.publish({
                 'type': 'reading',
                 'device_id': device_id,
-                'timestamp': int(timestamp.timestamp() * 1000),
+                'timestamp': epoch_millis(timestamp),
                 'actuators': {relay_key: state_value},
             })
 
@@ -806,7 +807,7 @@ class MQTTClient:
     async def _handle_heartbeat(self, device_id: str, data: Dict[str, Any]):
         """Handle lightweight heartbeat responses from discovery ping."""
         try:
-            current_time = datetime.utcnow()
+            current_time = utc_now()
             device = await self._touch_device(device_id, last_seen=current_time)
             logger.debug(f"Heartbeat received from device {device_id}")
             await self._publish_device_event(device)
@@ -865,7 +866,7 @@ class MQTTClient:
     async def mark_inactive_devices(self):
         """Mark MQTT devices as inactive if not seen for a while. Cameras are managed separately."""
         try:
-            cutoff_time = datetime.utcnow() - timedelta(seconds=settings.sensor_discovery_timeout)
+            cutoff_time = utc_now() - timedelta(seconds=settings.sensor_discovery_timeout)
 
             # Only mark MQTT sensor devices as inactive (cameras have their own heartbeat)
             await mark_devices_inactive(cutoff_time, device_type='mqtt_sensor')
@@ -883,7 +884,7 @@ class MQTTClient:
                         'type': 'device',
                         'device_id': device.device_key,
                         'is_active': device.is_active,
-                        'last_seen': int(device.last_seen.timestamp() * 1000) if device.last_seen else None,
+                        'last_seen': epoch_millis(device.last_seen) if device.last_seen else None,
                         'sensors': sensors,
                         'actuators': [],
                     })
@@ -981,7 +982,7 @@ class MQTTClient:
     async def _publish_rate_limited(self, topic: str, payload: Dict[str, Any]):
         """Aggregate actuator payloads per topic and publish at a limited rate."""
         bucket_key = topic
-        now = datetime.utcnow()
+        now = utc_now()
         async with self._actuator_publish_lock:
             bucket = self.actuator_buckets.get(bucket_key)
             if not bucket:
@@ -1017,7 +1018,7 @@ class MQTTClient:
             bucket = self.actuator_buckets.get(topic)
             if not bucket or not bucket['accumulator']:
                 return
-            await self._flush_actuator_bucket(topic, bucket, datetime.utcnow())
+            await self._flush_actuator_bucket(topic, bucket, utc_now())
 
     async def _flush_actuator_bucket(self, topic: str, bucket: Dict[str, Any], timestamp: datetime):
         accumulator = bucket['accumulator']

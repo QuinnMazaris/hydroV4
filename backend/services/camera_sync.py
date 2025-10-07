@@ -1,7 +1,6 @@
 """Camera synchronization service for syncing MediaMTX cameras to the database."""
 
 import json
-from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 import httpx
@@ -9,6 +8,7 @@ from loguru import logger
 
 from ..config import settings
 from ..services.persistence import upsert_device
+from ..utils.time import utc_now
 
 
 def get_mediamtx_api_url() -> str:
@@ -52,7 +52,7 @@ async def sync_cameras_to_db() -> Dict[str, Any]:
             data = response.json()
             items = data.get("items", []) if isinstance(data, dict) else data
 
-            current_time = datetime.utcnow()
+            current_time = utc_now()
 
             for item in items:
                 try:

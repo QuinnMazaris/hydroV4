@@ -22,11 +22,13 @@ from .models import (
     CameraFrame, CameraFrameResponse,
     LatestMetricSnapshot, LatestReadingsResponse,
     HistoricalReading, HistoricalReadingsResponse,
+    MetricStatistics,
 )
 from .mqtt_client import mqtt_client
 from .services.persistence import delete_old_readings, mark_devices_inactive
 from .services.camera_sync import sync_cameras_to_db
 from .services.frame_capture import capture_all_cameras, cleanup_old_frames, capture_frame_for_camera
+from .utils.time import epoch_millis, utc_now
 
 app = FastAPI(title="Hydroponic System API", version="1.0.0")
 
@@ -67,14 +69,14 @@ async def shutdown_event():
 
 async def maintenance_loop():
     """Background task handling device heartbeat checks, data retention, camera sync, and frame capture."""
-    last_cleanup = datetime.utcnow()
-    last_frame_capture = datetime.utcnow()
+    last_cleanup = utc_now()
+    last_frame_capture = utc_now()
     cleanup_interval = timedelta(hours=24)
     frame_capture_interval = timedelta(minutes=settings.frame_capture_interval_minutes)
 
     while True:
         try:
-            now = datetime.utcnow()
+            now = utc_now()
 
             # Sync cameras from MediaMTX to database
             await sync_cameras_to_db()
@@ -85,7 +87,7 @@ async def maintenance_loop():
                 last_frame_capture = now
 
             # Mark inactive devices (both MQTT and cameras)
-            cutoff_time = datetime.utcnow() - timedelta(seconds=settings.sensor_discovery_timeout)
+            cutoff_time = utc_now() - timedelta(seconds=settings.sensor_discovery_timeout)
             await mqtt_client.mark_inactive_devices()  # MQTT devices
             await mark_devices_inactive(cutoff_time, device_type='camera')  # Cameras
 
@@ -126,7 +128,7 @@ async def ws_sensors(websocket: WebSocket):
             "devices": snapshot.get("devices", {}),
             "latest": snapshot.get("latest", {}),
             "history": snapshot.get("history", {}),
-            "ts": datetime.utcnow().timestamp()
+            "ts": utc_now().timestamp()
         })
     except Exception:
         # If snapshot fails, continue with live stream
@@ -150,7 +152,7 @@ async def ws_sensors(websocket: WebSocket):
 
 
 def _ts_to_ms(ts: datetime) -> int:
-    return int(ts.timestamp() * 1000)
+    return epoch_millis(ts)
 
 
 def _downsample_points(points: List[Dict[str, Any]], target: int) -> List[Dict[str, Any]]:
@@ -260,7 +262,7 @@ async def build_initial_snapshot():
 
             # Get current values from cache instead of database
             cached_values = mqtt_client.get_cached_values()
-            current_time_ms = int(datetime.utcnow().timestamp() * 1000)
+            current_time_ms = epoch_millis(utc_now())
 
             for device_key, metric_values in cached_values.items():
                 devices.setdefault(device_key, {
@@ -278,7 +280,7 @@ async def build_initial_snapshot():
                         entry['metrics'][metric_key] = {'timestamp': current_time_ms, 'value': value}
                         entry['values'][metric_key] = value
 
-            since = datetime.utcnow() - timedelta(hours=24)
+            since = utc_now() - timedelta(hours=24)
             history_query = (
                 select(
                     Device.device_key,
@@ -367,14 +369,32 @@ async def get_historical_readings(
     limit: int = Query(
         default=1000,
         ge=1,
-        le=10000,
-        description="Maximum number of data points to return",
+        le=1000,
+        description="Maximum number of data points to return per metric",
+    ),
+    downsample_minutes: Optional[int] = Query(
+        default=None,
+        ge=1,
+        le=1440,
+        description="Downsample to N-minute intervals (auto if not specified)",
+    ),
+    include_stats: bool = Query(
+        default=True,
+        description="Include statistical summary for each metric",
     ),
     db: AsyncSession = Depends(get_db),
 ):
-    """Get historical sensor readings over a time range."""
+    """
+    Get historical sensor readings with intelligent downsampling and statistics.
+
+    Auto-downsampling based on time range:
+    - <1 hour: every reading
+    - 1-6 hours: 1-minute averages
+    - 6-24 hours: 5-minute averages
+    - 24+ hours: 15-minute averages
+    """
     # Calculate time range
-    end_time = datetime.utcnow()
+    end_time = utc_now()
     start_time = end_time - timedelta(hours=hours)
 
     # Parse filter lists
@@ -386,7 +406,18 @@ async def get_historical_readings(
     if metric_keys:
         metric_key_list = [key.strip() for key in metric_keys.split(",") if key.strip()]
 
-    # Build query
+    # Auto-determine downsampling interval if not specified
+    if downsample_minutes is None:
+        if hours < 1:
+            downsample_minutes = 0  # No downsampling
+        elif hours <= 6:
+            downsample_minutes = 1
+        elif hours <= 24:
+            downsample_minutes = 5
+        else:
+            downsample_minutes = 15
+
+    # Build query - get ALL data in range for accurate stats
     query = (
         select(
             Device.device_key,
@@ -400,8 +431,7 @@ async def get_historical_readings(
         .join(Reading, Reading.metric_id == Metric.id)
         .where(Reading.timestamp >= start_time)
         .where(Reading.timestamp <= end_time)
-        .order_by(Reading.timestamp.desc())
-        .limit(limit)
+        .order_by(Device.device_key, Metric.metric_key, Reading.timestamp.desc())
     )
 
     if device_key_list:
@@ -412,23 +442,143 @@ async def get_historical_readings(
     result = await db.execute(query)
     rows = result.all()
 
-    # Group by device
-    devices: Dict[str, List[HistoricalReading]] = {}
+    # Group by device and metric for processing
+    from collections import defaultdict
+    by_device_metric: Dict[str, Dict[str, List]] = defaultdict(lambda: defaultdict(list))
+
     for device_key, metric_key, display_name, unit, timestamp, value in rows:
-        reading = HistoricalReading(
-            metric_key=metric_key,
-            display_name=display_name,
-            unit=unit,
-            timestamp=timestamp,
-            value=value,
-        )
-        devices.setdefault(device_key, []).append(reading)
+        by_device_metric[device_key][metric_key].append({
+            "display_name": display_name,
+            "unit": unit,
+            "timestamp": timestamp,
+            "value": value,
+        })
+
+    # Process each device/metric: calculate stats and downsample
+    devices: Dict[str, List[HistoricalReading]] = {}
+    statistics: Dict[str, List[MetricStatistics]] = {}
+    total_raw_points = len(rows)
+    total_returned_points = 0
+
+    for device_key, metrics in by_device_metric.items():
+        devices[device_key] = []
+        statistics[device_key] = []
+
+        for metric_key, readings_list in metrics.items():
+            if not readings_list:
+                continue
+
+            # Sort by timestamp (oldest first)
+            readings_list.sort(key=lambda r: r["timestamp"])
+
+            display_name = readings_list[0]["display_name"]
+            unit = readings_list[0]["unit"]
+
+            # Calculate statistics
+            if include_stats:
+                numeric_values = []
+                for r in readings_list:
+                    try:
+                        numeric_values.append(float(r["value"]))
+                    except (ValueError, TypeError):
+                        pass
+
+                min_val = readings_list[0]["value"]
+                max_val = readings_list[0]["value"]
+                for r in readings_list:
+                    if numeric_values and isinstance(r["value"], (int, float)):
+                        if r["value"] < min_val:
+                            min_val = r["value"]
+                        if r["value"] > max_val:
+                            max_val = r["value"]
+
+                avg_val = sum(numeric_values) / len(numeric_values) if numeric_values else None
+
+                first_val = readings_list[0]["value"]
+                last_val = readings_list[-1]["value"]
+
+                change = None
+                change_percent = None
+                if numeric_values and len(numeric_values) >= 2:
+                    try:
+                        change = float(last_val) - float(first_val)
+                        if float(first_val) != 0:
+                            change_percent = (change / float(first_val)) * 100
+                    except (ValueError, TypeError):
+                        pass
+
+                statistics[device_key].append(MetricStatistics(
+                    metric_key=metric_key,
+                    display_name=display_name,
+                    unit=unit,
+                    count=len(readings_list),
+                    min=min_val,
+                    max=max_val,
+                    avg=avg_val,
+                    first_value=first_val,
+                    last_value=last_val,
+                    first_timestamp=readings_list[0]["timestamp"],
+                    last_timestamp=readings_list[-1]["timestamp"],
+                    change=change,
+                    change_percent=change_percent,
+                ))
+
+            # Downsample readings
+            if downsample_minutes > 0:
+                # Group into time buckets and average
+                from datetime import timedelta as td
+                bucket_size = td(minutes=downsample_minutes)
+                buckets: Dict[datetime, List] = defaultdict(list)
+
+                for r in readings_list:
+                    # Round timestamp to bucket
+                    bucket_ts = r["timestamp"].replace(second=0, microsecond=0)
+                    bucket_minutes = (bucket_ts.minute // downsample_minutes) * downsample_minutes
+                    bucket_ts = bucket_ts.replace(minute=bucket_minutes)
+                    buckets[bucket_ts].append(r)
+
+                # Average each bucket
+                downsampled = []
+                for bucket_ts in sorted(buckets.keys(), reverse=True):
+                    bucket_readings = buckets[bucket_ts]
+                    # Try to average if numeric, otherwise take most recent
+                    try:
+                        avg_value = sum(float(r["value"]) for r in bucket_readings) / len(bucket_readings)
+                    except (ValueError, TypeError):
+                        avg_value = bucket_readings[-1]["value"]
+
+                    downsampled.append(HistoricalReading(
+                        metric_key=metric_key,
+                        display_name=display_name,
+                        unit=unit,
+                        timestamp=bucket_ts,
+                        value=avg_value,
+                    ))
+                    if len(downsampled) >= limit:
+                        break
+
+                devices[device_key].extend(downsampled)
+                total_returned_points += len(downsampled)
+            else:
+                # No downsampling, but respect limit
+                for r in reversed(readings_list[:limit]):
+                    devices[device_key].append(HistoricalReading(
+                        metric_key=metric_key,
+                        display_name=display_name,
+                        unit=unit,
+                        timestamp=r["timestamp"],
+                        value=r["value"],
+                    ))
+                total_returned_points += min(len(readings_list), limit)
 
     return HistoricalReadingsResponse(
         devices=devices,
         start_time=start_time,
         end_time=end_time,
-        total_points=len(rows),
+        total_points=total_raw_points,
+        returned_points=total_returned_points,
+        aggregated=(downsample_minutes > 0),
+        statistics=statistics if include_stats else None,
     )
 
 
@@ -538,7 +688,7 @@ async def health_check():
     return {
         "status": "healthy",
         "mqtt_connected": mqtt_client.is_connected,
-        "timestamp": datetime.utcnow()
+        "timestamp": utc_now()
     }
 
 
@@ -555,7 +705,7 @@ async def get_camera_image(
     from datetime import datetime, timedelta
 
     # Calculate target timestamp
-    target_time = datetime.utcnow() - timedelta(days=days_ago)
+    target_time = utc_now() - timedelta(days=days_ago)
 
     # Find frame closest to target time
     query = (

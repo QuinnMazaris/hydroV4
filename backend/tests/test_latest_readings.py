@@ -1,5 +1,4 @@
 import os
-from datetime import datetime
 
 import pytest
 
@@ -12,6 +11,7 @@ os.environ["DATABASE_URL"] = f"sqlite+aiosqlite:///./{DB_PATH}"
 from backend.api import get_latest_readings  # noqa: E402
 from backend.database import AsyncSessionLocal, init_db  # noqa: E402
 from backend.models import Device, Metric, Reading  # noqa: E402
+from backend.utils.time import utc_now  # noqa: E402
 
 
 @pytest.mark.asyncio
@@ -24,7 +24,7 @@ async def test_latest_readings_endpoint_returns_metric_snapshot():
             device_type="sensor",
             is_active=True,
             name="Env Sensor",
-            last_seen=datetime.utcnow(),
+            last_seen=utc_now(),
         )
         session.add(device)
         await session.flush()
@@ -42,7 +42,7 @@ async def test_latest_readings_endpoint_returns_metric_snapshot():
         reading = Reading(
             metric_id=metric.id,
             value=23.4,
-            timestamp=datetime.utcnow(),
+            timestamp=utc_now(),
         )
         session.add(reading)
         await session.commit()
