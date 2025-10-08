@@ -160,7 +160,7 @@ class HydroAPIClient:
                 "status": "success",
                 "content_type": content_type,
                 "content_length": response.headers.get("content-length"),
-                "image_data": f"data:{content_type};base64,{image_base64}"
+                "image_base64": image_base64
             }
         response.raise_for_status()
         return {"status": "unknown"}

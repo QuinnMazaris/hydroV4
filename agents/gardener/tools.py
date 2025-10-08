@@ -300,12 +300,12 @@ class ToolRegistry:
         result = await self._client.get_camera_image(device_key, days_ago=days_ago)
 
         # Return MCP-formatted content for image display
-        if result.get("status") == "success" and "image_data" in result:
+        if result.get("status") == "success" and "image_base64" in result:
             return {
                 "content": [
                     {
                         "type": "image",
-                        "data": result["image_data"],
+                        "data": result["image_base64"],
                         "mimeType": result.get("content_type", "image/webp")
                     }
                 ],

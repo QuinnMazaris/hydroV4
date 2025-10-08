@@ -15,10 +15,47 @@ export function CameraFeed({ deviceKey = "camera_1" }: CameraFeedProps) {
   const pcRef = useRef<RTCPeerConnection | null>(null)
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null)
   const reconnectAttemptsRef = useRef(0)
+  const playAttemptTimeoutRef = useRef<NodeJS.Timeout | null>(null)
   const isUnmountedRef = useRef(false)
   const [isConnecting, setIsConnecting] = useState(false)
   const [isLive, setIsLive] = useState(false)
   const [error, setError] = useState<string | null>(null)
+
+  const clearScheduledPlayAttempt = () => {
+    if (playAttemptTimeoutRef.current) {
+      clearTimeout(playAttemptTimeoutRef.current)
+      playAttemptTimeoutRef.current = null
+    }
+  }
+
+  const attemptPlay = (attempt = 0) => {
+    const video = videoRef.current
+    if (!video || !video.srcObject) return
+
+    const playPromise = video.play()
+    if (!playPromise || typeof playPromise.then !== "function") {
+      clearScheduledPlayAttempt()
+      return
+    }
+
+    playPromise
+      .then(() => {
+        clearScheduledPlayAttempt()
+      })
+      .catch((err: unknown) => {
+        console.warn("Resume play failed:", err, {
+          readyState: video.readyState
+        })
+
+        if (attempt < 3) {
+          const delay = Math.min(200 * Math.pow(2, attempt), 1000)
+          clearScheduledPlayAttempt()
+          playAttemptTimeoutRef.current = setTimeout(() => {
+            attemptPlay(attempt + 1)
+          }, delay)
+        }
+      })
+  }
 
   const connectWebRTC = async () => {
     // Don't reconnect if component unmounted
@@ -49,11 +86,17 @@ export function CameraFeed({ deviceKey = "camera_1" }: CameraFeedProps) {
       // Handle incoming tracks (video/audio)
       pc.ontrack = (event) => {
         if (isUnmountedRef.current) return
-        
+
         if (videoRef.current && event.streams[0]) {
-          videoRef.current.srcObject = event.streams[0]
+          const incomingStream = event.streams[0]
+          const currentStream = videoRef.current.srcObject as MediaStream | null
+
+          if (!currentStream || currentStream.id !== incomingStream.id) {
+            videoRef.current.srcObject = incomingStream
+          }
+
           // Force play immediately - critical for Safari
-          videoRef.current.play().catch(err => console.warn('Play failed:', err))
+          attemptPlay()
           setIsLive(true)
           setIsConnecting(false)
           reconnectAttemptsRef.current = 0 // Reset on success
@@ -170,6 +213,7 @@ export function CameraFeed({ deviceKey = "camera_1" }: CameraFeedProps) {
       videoRef.current.srcObject = null
     }
     setIsLive(false)
+    clearScheduledPlayAttempt()
   }
 
   // Auto-connect on mount and handle page visibility for Safari
@@ -179,18 +223,10 @@ export function CameraFeed({ deviceKey = "camera_1" }: CameraFeedProps) {
 
     // Handle page visibility changes (critical for mobile Safari)
     const handleVisibilityChange = () => {
-      if (document.hidden) {
-        // Page went to background - Safari may pause the connection
-        console.log('Page hidden, pausing video')
-        if (videoRef.current) {
-          videoRef.current.pause()
-        }
-      } else {
+      if (!document.hidden) {
         // Page came back to foreground
-        console.log('Page visible, resuming video')
-        if (videoRef.current && videoRef.current.srcObject) {
-          videoRef.current.play().catch(err => console.warn('Resume play failed:', err))
-        }
+        console.log('Page visible, ensuring video playback')
+        attemptPlay()
         // Check connection state and reconnect if needed
         if (pcRef.current) {
           const state = pcRef.current.iceConnectionState
@@ -211,6 +247,7 @@ export function CameraFeed({ deviceKey = "camera_1" }: CameraFeedProps) {
       isUnmountedRef.current = true
       document.removeEventListener('visibilitychange', handleVisibilityChange)
       disconnect()
+      clearScheduledPlayAttempt()
     }
   }, [deviceKey])
 
