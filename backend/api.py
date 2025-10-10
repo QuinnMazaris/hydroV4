@@ -798,6 +798,45 @@ async def set_actuator_mode(
     }
 
 
+@app.patch("/api/metrics/{device_key}/{metric_key}/nickname")
+async def update_metric_nickname(
+    device_key: str,
+    metric_key: str,
+    nickname: Optional[str] = Query(None, description="Custom display name (null to clear)"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Set a custom nickname/display name for a metric (sensor or actuator)."""
+
+    result = await db.execute(
+        select(Metric)
+        .join(Device, Device.id == Metric.device_id)
+        .where(Device.device_key == device_key)
+        .where(Metric.metric_key == metric_key)
+    )
+    metric = result.scalar_one_or_none()
+
+    if not metric:
+        raise HTTPException(status_code=404, detail="Metric not found")
+
+    metric.display_name = nickname
+    await db.commit()
+
+    await event_broker.publish({
+        "type": "metric_nickname_updated",
+        "device_key": device_key,
+        "metric_key": metric_key,
+        "display_name": nickname,
+        "timestamp": utc_now().timestamp()
+    })
+
+    return {
+        "device_key": device_key,
+        "metric_key": metric_key,
+        "display_name": nickname,
+        "metric_type": metric.metric_type
+    }
+
+
 # Health check
 @app.get("/api/health")
 async def health_check():
