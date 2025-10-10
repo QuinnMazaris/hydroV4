@@ -1,7 +1,7 @@
 "use client"
 
 import type React from "react"
-import { useEffect, useMemo, useRef, useState } from "react"
+import { useEffect, useMemo, useState } from "react"
 
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
@@ -10,10 +10,12 @@ import { Activity, ChevronRight } from "lucide-react"
 
 import { describeValue, resolveMetricMeta } from "@/lib/metrics"
 import { useWsSensors } from "@/hooks/use-ws-metrics"
-import { DeviceToggle } from "@/components/device-toggle"
 import { CameraFeed } from "@/components/camera-feed"
 import { useCameras } from "@/hooks/use-cameras"
 import { cn } from "@/lib/utils"
+import { ActuatorDeviceGrid } from "@/components/actuator-device-grid"
+import type { ActuatorCard } from "@/components/actuator-device-grid"
+import { normalizeActuatorState, useActuatorQueue } from "@/hooks/use-actuator-queue"
 
 interface MetricCardProps {
   title: string
@@ -69,24 +71,12 @@ function MetricCard({ title, valueLabel, changeLabel, trend, icon, data, color, 
   )
 }
 
-const normalizeActuatorState = (value: any): 'on' | 'off' | 'unknown' => {
-  if (typeof value === 'boolean') return value ? 'on' : 'off'
-  if (typeof value === 'string') {
-    const lowered = value.toLowerCase()
-    if (lowered === 'on' || lowered === 'off') return lowered
-    const numeric = Number(lowered)
-    if (!Number.isNaN(numeric)) {
-      return numeric > 0 ? 'on' : 'off'
-    }
-  }
-  if (typeof value === 'number') return value > 0 ? 'on' : 'off'
-  return 'unknown'
-}
-
 export default function Dashboard() {
   const { sensorsByDevice, actuatorsByDevice, devices, status, errors } = useWsSensors()
   const { cameras, isLoading: camerasLoading, error: cameraError } = useCameras()
   const timeWindowMs = 24 * 60 * 60 * 1000
+
+  const { optimisticActuatorStates, enqueueActuatorRequest } = useActuatorQueue({ actuatorsByDevice })
 
   const formatRelativeTime = (timestamp?: number | null) => {
     if (!timestamp) return "Unknown"
@@ -101,120 +91,11 @@ export default function Dashboard() {
   }
 
 
-  type ActuatorInfo = {
-    key: string
-    label: string
-    unit: string
-    color: string
-    currentState: 'on' | 'off' | 'unknown'
-  }
-
-  type OptimisticEntry = {
-    state: 'on' | 'off'
-    queuedAt: number
-  }
-
-  const OPTIMISTIC_TIMEOUT_MS = 5_000  // Max time to wait for confirmation before reverting
-
-  const [optimisticActuatorStates, setOptimisticActuatorStates] = useState<Record<string, OptimisticEntry>>({})
+  type ActuatorInfo = ActuatorCard
 
   // Global control mode state
   const [globalMode, setGlobalMode] = useState<'auto' | 'manual'>('manual')
   const [controlModes, setControlModes] = useState<Record<string, Record<string, 'auto' | 'manual'>>>({})
-
-  type PendingActuatorRequest = {
-    deviceId: string
-    actuatorKey: string
-    optimisticKey: string
-    nextState: 'on' | 'off'
-  }
-
-  const FLUSH_DELAY_MS = 100  // Reduced from 300ms to 100ms for better responsiveness
-  const pendingActuatorsRef = useRef<Record<string, PendingActuatorRequest>>({})
-  const pendingOrderRef = useRef<string[]>([])
-  const flushTimerRef = useRef<number | null>(null)
-  const isFlushingRef = useRef(false)
-
-  const scheduleFlush = () => {
-    if (flushTimerRef.current != null) return
-    flushTimerRef.current = window.setTimeout(() => {
-      flushTimerRef.current = null
-      void flushPendingActuators()
-    }, FLUSH_DELAY_MS)
-  }
-
-  const flushPendingActuators = async () => {
-    if (isFlushingRef.current) {
-      scheduleFlush()
-      return
-    }
-
-    const snapshotKeys = pendingOrderRef.current.slice()
-    const snapshotEntries = snapshotKeys
-      .map((key) => pendingActuatorsRef.current[key])
-      .filter((entry): entry is PendingActuatorRequest => !!entry)
-
-    if (snapshotEntries.length === 0) {
-      return
-    }
-
-    // Clear pending buffers before sending; keep copy for error handling
-    pendingActuatorsRef.current = {}
-    pendingOrderRef.current = []
-
-    isFlushingRef.current = true
-    try {
-      const body = {
-        commands: snapshotEntries.map((entry) => ({
-          device_id: entry.deviceId,
-          actuator_key: entry.actuatorKey,
-          state: entry.nextState,
-        })),
-      }
-
-      console.log('📡 Sending batch:', body.commands.map(c => `${c.actuator_key}→${c.state}`).join(', '))
-
-      const res = await fetch('/api/actuators/batch-control', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-      })
-
-      if (!res.ok) {
-        const message = await res.text()
-        console.error('❌ API Batch Error:', { status: res.status, message })
-        throw new Error(message || 'Failed to send actuator commands')
-      }
-    } catch (error) {
-      console.error('Failed to send actuator commands', error)
-      setOptimisticActuatorStates((prev) => {
-        const next = { ...prev }
-        for (const entry of snapshotEntries) {
-          const optimistic = next[entry.optimisticKey]
-          if (optimistic && optimistic.state === entry.nextState) {
-            delete next[entry.optimisticKey]
-          }
-        }
-        return next
-      })
-      if (typeof window !== 'undefined') {
-        window.alert?.('Failed to send actuator command.')
-      }
-    } finally {
-      isFlushingRef.current = false
-      if (Object.keys(pendingActuatorsRef.current).length > 0) {
-        scheduleFlush()
-      }
-    }
-  }
-
-  const enqueueActuatorRequest = (entry: PendingActuatorRequest) => {
-    pendingActuatorsRef.current[entry.optimisticKey] = entry
-    if (!pendingOrderRef.current.includes(entry.optimisticKey)) {
-      pendingOrderRef.current.push(entry.optimisticKey)
-    }
-    scheduleFlush()
-  }
 
   const actuatorDevices = useMemo(() => {
     return Object.entries(devices)
@@ -318,21 +199,13 @@ export default function Dashboard() {
       return
     }
 
-    const optimisticKey = `${deviceId}:${actuator.key}`
-
     // Determine next state based on current state
     const currentState = actuator.currentState
     const nextState: 'on' | 'off' = currentState === 'on' ? 'off' : 'on'
 
-    // Optimistic update - immediately update UI
-    setOptimisticActuatorStates((prev) => ({
-      ...prev,
-      [optimisticKey]: { state: nextState, queuedAt: Date.now() },
-    }))
     enqueueActuatorRequest({
       deviceId,
       actuatorKey: actuator.key,
-      optimisticKey,
       nextState,
     })
   }
@@ -416,48 +289,6 @@ export default function Dashboard() {
     results.sort((a, b) => a.key.localeCompare(b.key))
     return results
   }, [devices, sensorsByDevice, timeWindowMs]);
-
-
-  useEffect(() => {
-    setOptimisticActuatorStates((prev) => {
-      if (!Object.keys(prev).length) return prev
-      let updated = false
-      const next = { ...prev }
-      const now = Date.now()
-
-      for (const [optimisticKey, entry] of Object.entries(prev)) {
-        const [deviceId, actuatorKey] = optimisticKey.split(':')
-        const series = actuatorsByDevice[deviceId]?.[actuatorKey]
-        const liveValue = series?.[series.length - 1]?.value
-        const liveState = normalizeActuatorState(liveValue)
-        const age = now - entry.queuedAt
-
-        // Clear optimistic state if:
-        // 1. Live state matches optimistic (command succeeded)
-        // 2. Timeout expired (command likely failed - give up after 5s)
-        // 3. Live state differs AND >2.5s passed (device confirmed different state)
-        if (
-          liveState === entry.state ||
-          age >= OPTIMISTIC_TIMEOUT_MS ||
-          (liveState !== entry.state && liveState !== 'unknown' && age > 2500)
-        ) {
-          delete next[optimisticKey]
-          updated = true
-        }
-      }
-      return updated ? next : prev
-    })
-  }, [actuatorsByDevice])
-
-  useEffect(() => {
-    return () => {
-      if (flushTimerRef.current != null) {
-        window.clearTimeout(flushTimerRef.current)
-      }
-    }
-  }, [])
-
-
   // No primary metric chart; sparklines serve as primary visualization
 
   return (
@@ -571,51 +402,11 @@ export default function Dashboard() {
             ))}
           </div>
 
-          {/* Bottom Section */}
-          {actuatorDevices.length > 0 && (
-            <section className="mb-12 space-y-6">
-              {actuatorDevices.map(({ deviceId, actuators }) => (
-                <div key={deviceId} className="space-y-3">
-                  <div className="flex items-center justify-between text-sm text-muted-foreground">
-                    <span className="font-medium text-foreground">{deviceId}</span>
-                    <span>
-                      {actuators.length} actuator{actuators.length === 1 ? "" : "s"}
-                    </span>
-                  </div>
-                  <div className="grid gap-6 grid-cols-2 md:grid-cols-4 lg:grid-cols-6">
-                    {actuators.map((actuator) => {
-                      const busyKey = `${deviceId}:${actuator.key}`
-                      const isOn = actuator.currentState === 'on'
-                      const label = actuator.label || actuator.key
-
-                      // Get control mode for this actuator
-                      const mode = controlModes[deviceId]?.[actuator.key] || 'manual'
-                      const isAutoMode = mode === 'auto'
-
-                      return (
-                        <div key={busyKey} className="relative">
-                          <div className={cn(isAutoMode && "opacity-60")}>
-                            <DeviceToggle
-                              id={busyKey}
-                              label={label}
-                              checked={isOn}
-                              onToggle={() => handleActuatorToggle(deviceId, actuator)}
-                            />
-                          </div>
-
-                          {isAutoMode && (
-                            <div className="absolute top-2 left-2 px-2 py-1 bg-blue-500 rounded text-xs font-bold text-white">
-                              AUTO
-                            </div>
-                          )}
-                        </div>
-                      )
-                    })}
-                  </div>
-                </div>
-              ))}
-            </section>
-          )}
+          <ActuatorDeviceGrid
+            devices={actuatorDevices}
+            controlModes={controlModes}
+            onToggle={handleActuatorToggle}
+          />
 
           <div className="space-y-6">
             {recentErrors.length > 0 && (
