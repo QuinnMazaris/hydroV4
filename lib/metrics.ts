@@ -1,3 +1,5 @@
+import metricConfig from '@/config/metric-metadata.json'
+
 export type MetricMeta = {
   id?: string
   label?: string
@@ -5,13 +7,7 @@ export type MetricMeta = {
   color?: string
 }
 
-const PALETTE = [
-  'oklch(0.7 0.15 142)',
-  'oklch(0.65 0.18 220)',
-  'oklch(0.75 0.12 60)',
-  'oklch(0.68 0.16 300)',
-  'oklch(0.72 0.14 180)',
-]
+const PALETTE = metricConfig.colorPalette
 
 const colorForId = (id: string) => {
   const sum = Array.from(id).reduce((acc, ch) => acc + ch.charCodeAt(0), 0)

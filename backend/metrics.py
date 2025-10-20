@@ -1,15 +1,30 @@
 from __future__ import annotations
 
+import json
+import os
 from dataclasses import dataclass
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
-PALETTE = [
-    "oklch(0.7 0.15 142)",
-    "oklch(0.65 0.18 220)",
-    "oklch(0.75 0.12 60)",
-    "oklch(0.68 0.16 300)",
-    "oklch(0.72 0.14 180)",
-]
+
+def _load_color_palette() -> List[str]:
+    """Load color palette from shared configuration file."""
+    config_path = os.path.join(os.path.dirname(__file__), "..", "config", "metric-metadata.json")
+    try:
+        with open(config_path, "r") as f:
+            config = json.load(f)
+            return config.get("colorPalette", [])
+    except (FileNotFoundError, json.JSONDecodeError):
+        # Fallback to hardcoded palette if config file is missing
+        return [
+            "oklch(0.7 0.15 142)",
+            "oklch(0.65 0.18 220)",
+            "oklch(0.75 0.12 60)",
+            "oklch(0.68 0.16 300)",
+            "oklch(0.72 0.14 180)",
+        ]
+
+
+PALETTE = _load_color_palette()
 
 
 @dataclass(frozen=True)
