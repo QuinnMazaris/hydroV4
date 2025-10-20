@@ -7,6 +7,34 @@ import type {
   IncomingEvent,
 } from "./use-ws-metrics"
 
+/**
+ * Helper function to append a metric point to an array with automatic trimming.
+ * Handles timestamp ordering and deduplication.
+ */
+function appendMetricPoint(
+  arr: MetricPoint[],
+  timestamp: number,
+  value: unknown,
+  maxPoints: number,
+  checkDuplicates = false
+): MetricPoint[] {
+  const last = arr[arr.length - 1]
+
+  if (!last || timestamp > last.timestamp) {
+    arr.push({ timestamp, value })
+  } else if (timestamp === last.timestamp) {
+    last.value = value
+  } else if (checkDuplicates && !arr.some((x) => x.timestamp === timestamp)) {
+    arr.push({ timestamp, value })
+  }
+
+  if (arr.length > maxPoints) {
+    return arr.slice(-maxPoints)
+  }
+
+  return arr
+}
+
 export type CommitSchedulerOptions = {
   throttleRef: MutableRefObject<number | null>
   fps: number
@@ -89,24 +117,15 @@ export function processSnapshot(event: SnapshotEvent, context: SnapshotContext) 
       }
 
       for (const [metricName, points] of Object.entries(metrics)) {
-        const arr = resolveSeries(metricName)
+        let arr = resolveSeries(metricName)
         for (const p of points) {
-          const last = arr[arr.length - 1]
-          if (!last || p.timestamp > last.timestamp) {
-            arr.push({ timestamp: p.timestamp, value: p.value })
-          } else if (p.timestamp === last.timestamp) {
-            last.value = p.value
-          } else if (!arr.some((x) => x.timestamp === p.timestamp)) {
-            arr.push({ timestamp: p.timestamp, value: p.value })
-          }
+          arr = appendMetricPoint(arr, p.timestamp, p.value, maxPointsPerSeries, true)
         }
-        if (arr.length > maxPointsPerSeries) {
-          const trimmed = arr.slice(-maxPointsPerSeries)
-          if (actuatorSeries[metricName] === arr) {
-            actuatorSeries[metricName] = trimmed
-          } else {
-            sensorSeries[metricName] = trimmed
-          }
+        // Update the reference if trimmed
+        if (actuatorSeries[metricName]) {
+          actuatorSeries[metricName] = arr
+        } else {
+          sensorSeries[metricName] = arr
         }
       }
     }
@@ -124,16 +143,9 @@ export function processSnapshot(event: SnapshotEvent, context: SnapshotContext) 
       const valueTimestamp = metricData && typeof metricData.timestamp === "number" ? metricData.timestamp : ts
       const isActuator = !!(deviceInfo?.actuators && metricName in deviceInfo.actuators) || !!actuatorSeries[metricName]
       const seriesMap = isActuator ? actuatorSeries : sensorSeries
-      const arr = (seriesMap[metricName] ||= [])
-      const last = arr[arr.length - 1]
-      if (!last || valueTimestamp > last.timestamp) {
-        arr.push({ timestamp: valueTimestamp, value })
-      } else if (last.timestamp === valueTimestamp) {
-        last.value = value
-      }
-      if (arr.length > maxPointsPerSeries) {
-        seriesMap[metricName] = arr.slice(-maxPointsPerSeries)
-      }
+      let arr = (seriesMap[metricName] ||= [])
+      arr = appendMetricPoint(arr, valueTimestamp, value, maxPointsPerSeries)
+      seriesMap[metricName] = arr
     }
   }
 }
@@ -152,31 +164,17 @@ export function processReading(event: ReadingEvent, context: ReadingContext) {
 
   if (event.sensors) {
     for (const [sensorName, value] of Object.entries(event.sensors)) {
-      const arr = (sensorSeries[sensorName] ||= [])
-      const last = arr[arr.length - 1]
-      if (last && last.timestamp === ts) {
-        last.value = value
-      } else {
-        arr.push({ timestamp: ts, value })
-      }
-      if (arr.length > maxPointsPerSeries) {
-        sensorSeries[sensorName] = arr.slice(-maxPointsPerSeries)
-      }
+      let arr = (sensorSeries[sensorName] ||= [])
+      arr = appendMetricPoint(arr, ts, value, maxPointsPerSeries)
+      sensorSeries[sensorName] = arr
     }
   }
 
   if (event.actuators) {
     for (const [actuatorName, value] of Object.entries(event.actuators)) {
-      const arr = (actuatorSeries[actuatorName] ||= [])
-      const last = arr[arr.length - 1]
-      if (last && last.timestamp === ts) {
-        last.value = value
-      } else {
-        arr.push({ timestamp: ts, value })
-      }
-      if (arr.length > maxPointsPerSeries) {
-        actuatorSeries[actuatorName] = arr.slice(-maxPointsPerSeries)
-      }
+      let arr = (actuatorSeries[actuatorName] ||= [])
+      arr = appendMetricPoint(arr, ts, value, maxPointsPerSeries)
+      actuatorSeries[actuatorName] = arr
     }
   }
 }
