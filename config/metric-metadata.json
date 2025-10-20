@@ -1,0 +1,19 @@
+{
+  "colorPalette": [
+    "oklch(0.7 0.15 142)",
+    "oklch(0.65 0.18 220)",
+    "oklch(0.75 0.12 60)",
+    "oklch(0.68 0.16 300)",
+    "oklch(0.72 0.14 180)"
+  ],
+  "metricDefaults": {
+    "sensor": {
+      "unit": null,
+      "precision": 2
+    },
+    "actuator": {
+      "unit": null,
+      "precision": 0
+    }
+  }
+}

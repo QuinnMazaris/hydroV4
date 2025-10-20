@@ -487,23 +487,80 @@ class MQTTClient:
         except Exception as e:
             logger.error(f"Error processing message for topic {topic}: {e}")
 
+    async def _validate_and_get_device_id(
+        self,
+        topic: str,
+        data: Dict[str, Any],
+        error_context: str,
+    ) -> Optional[str]:
+        """
+        Extract and validate device_id from message data or topic.
+        Returns device_id if valid, None otherwise (error already published).
+        """
+        derived_id = data.get('device_id') if isinstance(data, dict) else None
+        device_id = derived_id or self._device_id_from_topic(topic)
+
+        if not device_id:
+            logger.warning(f'{error_context} missing device_id; emitted error and skipped payload', topic=topic)
+            await self._publish_error(
+                'missing_device_id',
+                f'{error_context} missing device_id; payload ignored.',
+                {
+                    'topic': topic,
+                    'payload_keys': list(data.keys()) if isinstance(data, dict) else [],
+                    'device_id': derived_id,
+                },
+            )
+            return None
+
+        return device_id
+
+    async def _process_metric_reading(
+        self,
+        device_id: str,
+        metric_key: str,
+        value: Any,
+        timestamp: datetime,
+        *,
+        label: Optional[str] = None,
+        unit: Optional[str] = None,
+    ) -> bool:
+        """
+        Process a single metric reading: ensure metric exists, insert reading, update cache.
+        Returns True if successful, False otherwise.
+        """
+        metric_id = await self._ensure_metric_id(
+            device_id,
+            metric_key,
+            label=label,
+            unit=unit,
+        )
+        if metric_id is None:
+            logger.warning(
+                'No metric registered for value; skipping reading',
+                device_id=device_id,
+                metric=metric_key,
+            )
+            return False
+
+        try:
+            await insert_reading(metric_id, value, timestamp=timestamp)
+            self._update_cache_value(device_id, metric_key, value)
+            return True
+        except Exception as exc:
+            logger.error(f"Failed to persist reading for {device_id}/{metric_key}: {exc}")
+            await self._publish_error(
+                'metric_persist_failed',
+                'Failed to persist metric reading; continuing with live stream.',
+                {'device_id': device_id, 'metric_key': metric_key},
+            )
+            return False
 
     async def _handle_sensor_data(self, topic: str, data: Dict[str, Any]):
         """Handle sensor data messages."""
         try:
-            derived_id = data.get('device_id') if isinstance(data, dict) else None
-            device_id = derived_id or self._device_id_from_topic(topic)
+            device_id = await self._validate_and_get_device_id(topic, data, 'Sensor data')
             if not device_id:
-                logger.warning('Sensor data missing device_id; emitted error and skipped payload', topic=topic)
-                await self._publish_error(
-                    'missing_device_id',
-                    'Sensor data missing device_id; payload ignored.',
-                    {
-                        'topic': topic,
-                        'payload_keys': list(data.keys()) if isinstance(data, dict) else [],
-                        'device_id': derived_id,
-                    },
-                )
                 return
 
             # Wait for discovery to complete before processing sensor data
@@ -525,30 +582,14 @@ class MQTTClient:
 
             for sensor_name, value in sensors.items():
                 meta = build_metric_meta(sensor_name)
-                metric_id = await self._ensure_metric_id(
+                await self._process_metric_reading(
                     device_id,
                     sensor_name,
+                    value,
+                    timestamp,
                     label=meta.label,
                     unit=meta.unit,
                 )
-                if metric_id is None:
-                    logger.warning(
-                        'No metric registered for sensor value; skipping reading',
-                        device_id=device_id,
-                        sensor=sensor_name,
-                    )
-                    continue
-                try:
-                    await insert_reading(metric_id, value, timestamp=timestamp)
-                    # Update in-memory cache
-                    self._update_cache_value(device_id, sensor_name, value)
-                except Exception as exc:
-                    logger.error(f"Failed to persist sensor reading for {device_id}/{sensor_name}: {exc}")
-                    await self._publish_error(
-                        'sensor_persist_failed',
-                        'Failed to persist sensor reading; continuing with live stream.',
-                        {'device_id': device_id, 'topic': topic, 'metric_key': sensor_name},
-                    )
 
             await event_broker.publish({
                 'type': 'reading',
@@ -566,19 +607,8 @@ class MQTTClient:
     async def _handle_relay_status(self, topic: str, data: Dict[str, Any]):
         """Handle relay status messages."""
         try:
-            derived_id = data.get('device_id') if isinstance(data, dict) else None
-            device_id = derived_id or self._device_id_from_topic(topic)
+            device_id = await self._validate_and_get_device_id(topic, data, 'Relay status')
             if not device_id:
-                logger.warning('Relay status missing device_id; emitted error and skipped payload', topic=topic)
-                await self._publish_error(
-                    'missing_device_id',
-                    'Relay status missing device_id; payload ignored.',
-                    {
-                        'topic': topic,
-                        'payload_keys': list(data.keys()) if isinstance(data, dict) else [],
-                        'device_id': derived_id,
-                    },
-                )
                 return
 
             items = data.items() if isinstance(data, dict) else []
@@ -610,30 +640,14 @@ class MQTTClient:
                     label = f"Relay {relay_num}"
                 label = label or relay_key
 
-                metric_id = await self._ensure_metric_id(
+                await self._process_metric_reading(
                     device_id,
                     relay_key,
+                    value,
+                    timestamp,
                     label=label,
                     unit=unit,
                 )
-                if metric_id is None:
-                    logger.warning(
-                        'No metric registered for relay state; skipping reading',
-                        device_id=device_id,
-                        relay=relay_key,
-                    )
-                    continue
-                try:
-                    await insert_reading(metric_id, value, timestamp=timestamp)
-                    # Update in-memory cache
-                    self._update_cache_value(device_id, relay_key, value)
-                except Exception as exc:
-                    logger.error(f"Failed to persist relay state for {device_id}/{relay_key}: {exc}")
-                    await self._publish_error(
-                        'relay_persist_failed',
-                        'Failed to persist relay state; continuing with live stream.',
-                        {'device_id': device_id, 'topic': topic, 'metric_key': relay_key},
-                    )
 
             await event_broker.publish({
                 'type': 'reading',
@@ -651,19 +665,8 @@ class MQTTClient:
     async def _handle_critical_relays(self, topic: str, data: Dict[str, Any]):
         """Handle legacy critical relay updates."""
         try:
-            derived_id = data.get('device_id') if isinstance(data, dict) else None
-            device_id = derived_id or self._device_id_from_topic(topic)
+            device_id = await self._validate_and_get_device_id(topic, data, 'Critical relay update')
             if not device_id or device_id == 'critical_relays':
-                logger.warning('Critical relay update missing device identity; emitted error and skipped payload', topic=topic)
-                await self._publish_error(
-                    'missing_device_id',
-                    'Critical relay update missing device_id; payload ignored.',
-                    {
-                        'topic': topic,
-                        'payload_keys': list(data.keys()) if isinstance(data, dict) else [],
-                        'device_id': derived_id,
-                    },
-                )
                 return
 
             relay_key = data.get('relay', '') if isinstance(data, dict) else ''
@@ -678,15 +681,11 @@ class MQTTClient:
             raw_state = data.get('state') if isinstance(data, dict) else None
             if isinstance(raw_state, bool):
                 state_value = raw_state
-                state_label = 'on' if raw_state else 'off'
             else:
                 state_label = str(raw_state).lower() if raw_state is not None else 'unknown'
                 if isinstance(raw_state, str):
                     lowered = raw_state.strip().lower()
-                    if lowered in {'on', 'off'}:
-                        state_value = lowered == 'on'
-                    else:
-                        state_value = state_label
+                    state_value = lowered == 'on' if lowered in {'on', 'off'} else state_label
                 else:
                     state_value = state_label
 
@@ -701,31 +700,16 @@ class MQTTClient:
                 label = f"Relay {relay_num}"
             label = label or relay_key
 
-            metric_id = await self._ensure_metric_id(
+            success = await self._process_metric_reading(
                 device_id,
                 relay_key,
+                state_value,
+                timestamp,
                 label=label,
                 unit=unit,
             )
-            if metric_id is None:
-                logger.warning(
-                    'No metric registered for critical relay state; skipping reading',
-                    device_id=device_id,
-                    relay=relay_key,
-                )
+            if not success:
                 return
-
-            try:
-                await insert_reading(metric_id, state_value, timestamp=timestamp)
-                # Update in-memory cache
-                self._update_cache_value(device_id, relay_key, state_value)
-            except Exception as exc:
-                logger.error(f"Failed to persist critical relay state for {device_id}/{relay_key}: {exc}")
-                await self._publish_error(
-                    'relay_persist_failed',
-                    'Failed to persist critical relay state; continuing with live stream.',
-                    {'device_id': device_id, 'topic': topic, 'metric_key': relay_key},
-                )
 
             await event_broker.publish({
                 'type': 'reading',
@@ -742,19 +726,8 @@ class MQTTClient:
     async def _handle_device_status_msg(self, topic: str, data: Dict[str, Any]):
         """Handle device status messages."""
         try:
-            derived_id = data.get('device_id') if isinstance(data, dict) else None
-            device_id = derived_id or self._device_id_from_topic(topic)
+            device_id = await self._validate_and_get_device_id(topic, data, 'Status update')
             if not device_id:
-                logger.warning('Status update missing device_id; emitted error and skipped payload', topic=topic)
-                await self._publish_error(
-                    'missing_device_id',
-                    'Status update missing device_id; payload ignored.',
-                    {
-                        'topic': topic,
-                        'payload_keys': list(data.keys()) if isinstance(data, dict) else [],
-                        'device_id': derived_id,
-                    },
-                )
                 return
 
             metadata = {'status': data} if data is not None else None
