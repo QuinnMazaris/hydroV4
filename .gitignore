@@ -33,3 +33,7 @@ hydro.db
 
 # camera configuration (contains credentials)
 /backend/cameras.json
+
+# python artifacts
+__pycache__/
+*.py[cod]
