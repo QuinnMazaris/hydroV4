@@ -285,19 +285,25 @@ class AutomationEngine:
         rule_name = rule.get('name', 'unknown')
         rule_id = rule.get('id', 'unknown')
 
+        actions_executed = False
+
         for action in actions:
             action_type = action.get('type')
 
             if action_type == 'set_actuator':
                 await self._execute_set_actuator(action, rule_name)
+                actions_executed = True
 
             elif action_type == 'run_ai_agent':
                 await self._execute_run_ai_agent(action, rule_name)
-                # Mark rule as executed (for cron tracking)
-                self._rule_last_executed[rule_id] = datetime.now()
+                actions_executed = True
 
             else:
                 logger.warning(f"Unknown action type: {action_type}")
+
+        if actions_executed:
+            # Mark rule as executed (for cron tracking)
+            self._rule_last_executed[rule_id] = datetime.now()
 
     async def _execute_set_actuator(self, action: Dict[str, Any], rule_name: str) -> None:
         """Execute a set_actuator action.
