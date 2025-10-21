@@ -2,14 +2,12 @@
 from __future__ import annotations
 
 import asyncio
-import json
 from dataclasses import dataclass
-from datetime import datetime
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional
-import uuid
 
 from .hydro_client import DeviceInfo, HydroAPIClient
+from .rule_manager import RuleManager
 
 ToolHandler = Callable[[Dict[str, Any]], Awaitable[Dict[str, Any]]]
 
@@ -30,7 +28,10 @@ class ToolRegistry:
         self._tools: Dict[str, ToolSpec] = {}
         self._device_cache: List[DeviceInfo] = []
         self._lock = asyncio.Lock()
-        self._rules_path = Path(__file__).parent / 'data' / 'automation_rules.json'
+
+        # Use shared rule manager with AI protection layer
+        rules_path = Path(__file__).parent / 'data' / 'automation_rules.json'
+        self._rule_manager = RuleManager(rules_path)
 
     @property
     def devices(self) -> List[DeviceInfo]:  # pragma: no cover - trivial
@@ -345,162 +346,117 @@ class ToolRegistry:
             ]
         }
 
-    def _load_rules_file(self) -> Dict[str, Any]:
-        """Load the automation rules JSON file."""
-        if not self._rules_path.exists():
-            return {"version": "1.0", "rules": [], "metadata": {}}
-
-        with open(self._rules_path, 'r') as f:
-            return json.load(f)
-
-    def _save_rules_file(self, data: Dict[str, Any]) -> None:
-        """Save the automation rules JSON file."""
-        # Ensure parent directory exists
-        self._rules_path.parent.mkdir(parents=True, exist_ok=True)
-
-        # Update metadata
-        data.setdefault("metadata", {})
-        data["metadata"]["last_modified"] = datetime.now().isoformat()
-        data["metadata"]["modified_by"] = "llm_tool"
-
-        with open(self._rules_path, 'w') as f:
-            json.dump(data, f, indent=2)
-
     async def _handle_list_automation_rules(self, _: Dict[str, Any]) -> Dict[str, Any]:
         """List all automation rules."""
-        data = self._load_rules_file()
-        return {
-            "rules": data.get("rules", []),
-            "total_count": len(data.get("rules", [])),
-            "enabled_count": sum(1 for r in data.get("rules", []) if r.get("enabled", False))
-        }
+        return self._rule_manager.list_rules()
 
     async def _handle_create_automation_rule(self, args: Dict[str, Any]) -> Dict[str, Any]:
-        """Create a new automation rule."""
-        data = self._load_rules_file()
-
-        # Generate unique ID
-        rule_id = f"rule-{uuid.uuid4().hex[:8]}"
-
-        # Create new rule
-        new_rule = {
-            "id": rule_id,
-            "name": args["name"],
-            "description": args.get("description", ""),
-            "enabled": args.get("enabled", False),
-            "priority": args.get("priority", 100),
-            "conditions": args["conditions"],
-            "actions": args["actions"]
-        }
-
-        # Add to rules list
-        data.setdefault("rules", [])
-        data["rules"].append(new_rule)
-
-        # Save file
-        self._save_rules_file(data)
-
-        return {
-            "status": "success",
-            "rule_id": rule_id,
-            "rule": new_rule
-        }
+        """Create a new automation rule (AI cannot create protected rules)."""
+        # AI-created rules are never protected
+        return self._rule_manager.create_rule(
+            name=args["name"],
+            conditions=args["conditions"],
+            actions=args["actions"],
+            description=args.get("description", ""),
+            enabled=args.get("enabled", False),
+            protected=False,  # AI cannot create protected rules
+            priority=args.get("priority", 100),
+            modified_by="llm_tool"
+        )
 
     async def _handle_update_automation_rule(self, args: Dict[str, Any]) -> Dict[str, Any]:
-        """Update an existing automation rule."""
-        data = self._load_rules_file()
+        """Update an existing automation rule (AI protection enforced)."""
         rule_id = args["rule_id"]
 
-        # Find rule
-        rule_index = None
-        for i, rule in enumerate(data.get("rules", [])):
-            if rule.get("id") == rule_id:
-                rule_index = i
-                break
+        # Check if rule is protected first
+        data = self._rule_manager.load_rules_file()
+        result = self._rule_manager.find_rule_by_id(data.get("rules", []), rule_id)
 
-        if rule_index is None:
+        if result is None:
             return {
                 "status": "error",
                 "message": f"Rule with ID '{rule_id}' not found"
             }
 
-        # Update rule fields
-        rule = data["rules"][rule_index]
-        if "name" in args:
-            rule["name"] = args["name"]
-        if "description" in args:
-            rule["description"] = args["description"]
-        if "enabled" in args:
-            rule["enabled"] = args["enabled"]
-        if "priority" in args:
-            rule["priority"] = args["priority"]
-        if "conditions" in args:
-            rule["conditions"] = args["conditions"]
-        if "actions" in args:
-            rule["actions"] = args["actions"]
+        _, rule = result
 
-        # Save file
-        self._save_rules_file(data)
+        # AI cannot modify protected rules
+        if rule.get("protected", False):
+            return {
+                "status": "error",
+                "message": f"Rule '{rule.get('name')}' is protected and cannot be modified"
+            }
 
-        return {
-            "status": "success",
-            "rule_id": rule_id,
-            "rule": rule
-        }
+        # AI cannot change protection status
+        if "protected" in args:
+            return {
+                "status": "error",
+                "message": "Cannot modify protection status of rules"
+            }
+
+        # Use rule manager to update (without protected field)
+        return self._rule_manager.update_rule(
+            rule_id=rule_id,
+            name=args.get("name"),
+            description=args.get("description"),
+            enabled=args.get("enabled"),
+            protected=None,  # AI cannot change protection
+            priority=args.get("priority"),
+            conditions=args.get("conditions"),
+            actions=args.get("actions"),
+            modified_by="llm_tool"
+        )
 
     async def _handle_delete_automation_rule(self, args: Dict[str, Any]) -> Dict[str, Any]:
-        """Delete an automation rule."""
-        data = self._load_rules_file()
+        """Delete an automation rule (AI protection enforced)."""
         rule_id = args["rule_id"]
 
-        # Find and remove rule
-        original_count = len(data.get("rules", []))
-        data["rules"] = [r for r in data.get("rules", []) if r.get("id") != rule_id]
+        # Check if rule is protected first
+        data = self._rule_manager.load_rules_file()
+        result = self._rule_manager.find_rule_by_id(data.get("rules", []), rule_id)
 
-        if len(data["rules"]) == original_count:
+        if result is None:
             return {
                 "status": "error",
                 "message": f"Rule with ID '{rule_id}' not found"
             }
 
-        # Save file
-        self._save_rules_file(data)
+        _, rule = result
 
-        return {
-            "status": "success",
-            "rule_id": rule_id,
-            "message": "Rule deleted successfully"
-        }
+        # AI cannot delete protected rules
+        if rule.get("protected", False):
+            return {
+                "status": "error",
+                "message": f"Rule '{rule.get('name')}' is protected and cannot be deleted"
+            }
+
+        return self._rule_manager.delete_rule(rule_id, modified_by="llm_tool")
 
     async def _handle_toggle_automation_rule(self, args: Dict[str, Any]) -> Dict[str, Any]:
-        """Enable or disable an automation rule."""
-        data = self._load_rules_file()
+        """Enable or disable an automation rule (AI protection enforced)."""
         rule_id = args["rule_id"]
         enabled = args["enabled"]
 
-        # Find rule
-        rule_found = False
-        for rule in data.get("rules", []):
-            if rule.get("id") == rule_id:
-                rule["enabled"] = enabled
-                rule_found = True
-                break
+        # Check if rule is protected first
+        data = self._rule_manager.load_rules_file()
+        result = self._rule_manager.find_rule_by_id(data.get("rules", []), rule_id)
 
-        if not rule_found:
+        if result is None:
             return {
                 "status": "error",
                 "message": f"Rule with ID '{rule_id}' not found"
             }
 
-        # Save file
-        self._save_rules_file(data)
+        _, rule = result
 
-        return {
-            "status": "success",
-            "rule_id": rule_id,
-            "enabled": enabled,
-            "message": f"Rule {'enabled' if enabled else 'disabled'} successfully"
-        }
+        # AI cannot toggle protected rules
+        if rule.get("protected", False):
+            return {
+                "status": "error",
+                "message": f"Rule '{rule.get('name')}' is protected and cannot be enabled/disabled"
+            }
+
+        return self._rule_manager.toggle_rule(rule_id, enabled, modified_by="llm_tool")
 
     def all(self) -> List[ToolSpec]:
         return list(self._tools.values())

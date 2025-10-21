@@ -10,9 +10,14 @@ import json
 import logging
 from datetime import datetime, time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, TYPE_CHECKING
+
+from croniter import croniter
 
 from .hydro_client import HydroAPIClient
+
+if TYPE_CHECKING:
+    from .agent import GardenerAgent
 
 logger = logging.getLogger(__name__)
 
@@ -20,17 +25,20 @@ logger = logging.getLogger(__name__)
 class AutomationEngine:
     """Automation engine that evaluates rules and executes actions."""
 
-    def __init__(self, rules_path: Path, hydro_client: HydroAPIClient):
+    def __init__(self, rules_path: Path, hydro_client: HydroAPIClient, agent: Optional['GardenerAgent'] = None):
         """Initialize the automation engine.
 
         Args:
             rules_path: Path to automation_rules.json file
             hydro_client: Client for communicating with hydro-app API
+            agent: Optional GardenerAgent instance for AI actions
         """
         self.rules_path = rules_path
         self.hydro_client = hydro_client
+        self.agent = agent
         self.rules: List[Dict[str, Any]] = []
         self._last_load_time: Optional[datetime] = None
+        self._rule_last_executed: Dict[str, datetime] = {}  # Track cron rule execution times
 
     def load_rules(self) -> None:
         """Load automation rules from JSON file."""
@@ -97,6 +105,9 @@ class AutomationEngine:
         elif cond_type == 'sensor_threshold':
             return self._evaluate_sensor_threshold(condition, sensor_data)
 
+        elif cond_type == 'cron':
+            return self._evaluate_cron(condition)
+
         else:
             logger.warning(f"Unknown condition type: {cond_type}")
             return False
@@ -135,6 +146,44 @@ class AutomationEngine:
 
         except Exception as e:
             logger.error(f"Error evaluating days_of_week condition: {e}")
+            return False
+
+    def _evaluate_cron(self, condition: Dict[str, Any]) -> bool:
+        """Check if current time matches cron expression.
+
+        Cron expressions follow standard format: minute hour day month weekday
+        Example: "0 */2 * * *" = every 2 hours at the top of the hour
+        """
+        try:
+            expression = condition.get('expression')
+            if not expression:
+                logger.error("Cron condition missing 'expression' field")
+                return False
+
+            # Get rule ID from parent context (will be set during evaluation)
+            rule_id = condition.get('_rule_id', 'unknown')
+
+            now = datetime.now()
+            cron = croniter(expression, now)
+
+            # Get the previous scheduled time
+            prev_time = cron.get_prev(datetime)
+
+            # Check if we haven't executed since the last scheduled time
+            last_executed = self._rule_last_executed.get(rule_id)
+
+            # If never executed, or last execution was before the previous scheduled time
+            if last_executed is None or last_executed < prev_time:
+                # Check if the previous scheduled time is recent (within last evaluation cycle)
+                # This prevents executing multiple times for the same cron trigger
+                time_since_prev = (now - prev_time).total_seconds()
+                if time_since_prev < 60:  # Within last minute
+                    return True
+
+            return False
+
+        except Exception as e:
+            logger.error(f"Error evaluating cron condition: {e}")
             return False
 
     def _evaluate_sensor_threshold(
@@ -199,10 +248,13 @@ class AutomationEngine:
             True if all conditions are met, False otherwise
         """
         conditions = rule.get('conditions', {})
+        rule_id = rule.get('id', 'unknown')
 
         # Handle all_of logic (AND)
         all_of = conditions.get('all_of', [])
         for condition in all_of:
+            # Inject rule_id for cron condition tracking
+            condition['_rule_id'] = rule_id
             if not await self.evaluate_condition(condition, sensor_data):
                 return False
 
@@ -211,6 +263,8 @@ class AutomationEngine:
         if any_of:
             any_met = False
             for condition in any_of:
+                # Inject rule_id for cron condition tracking
+                condition['_rule_id'] = rule_id
                 if await self.evaluate_condition(condition, sensor_data):
                     any_met = True
                     break
@@ -228,12 +282,19 @@ class AutomationEngine:
             rule: Rule dictionary with actions
         """
         actions = rule.get('actions', [])
+        rule_name = rule.get('name', 'unknown')
+        rule_id = rule.get('id', 'unknown')
 
         for action in actions:
             action_type = action.get('type')
 
             if action_type == 'set_actuator':
-                await self._execute_set_actuator(action, rule.get('name', 'unknown'))
+                await self._execute_set_actuator(action, rule_name)
+
+            elif action_type == 'run_ai_agent':
+                await self._execute_run_ai_agent(action, rule_name)
+                # Mark rule as executed (for cron tracking)
+                self._rule_last_executed[rule_id] = datetime.now()
 
             else:
                 logger.warning(f"Unknown action type: {action_type}")
@@ -297,6 +358,42 @@ class AutomationEngine:
 
         except Exception as e:
             logger.error(f"Error executing set_actuator action: {e}")
+
+    async def _execute_run_ai_agent(self, action: Dict[str, Any], rule_name: str) -> None:
+        """Execute a run_ai_agent action.
+
+        Args:
+            action: Action dictionary containing prompt and agent parameters
+            rule_name: Name of the rule (for logging)
+        """
+        try:
+            if self.agent is None:
+                logger.error(f"Rule '{rule_name}': Cannot run AI agent - agent not initialized")
+                return
+
+            prompt = action.get('prompt', 'Analyze the current system state and recommend actions.')
+            temperature = action.get('temperature', 0.3)
+            max_iterations = action.get('max_iterations', 6)
+
+            logger.info(f"Rule '{rule_name}': Starting AI agent run")
+
+            # Run the agent with the specified prompt
+            from .agent import ChatMessage
+            messages = [ChatMessage(role="user", content=prompt)]
+
+            result = await self.agent.run(messages=messages, temperature=temperature)
+
+            logger.info(
+                f"Rule '{rule_name}': AI agent completed. "
+                f"Final response: {result.get('final', 'No response')[:200]}..."
+            )
+
+            # Log the agent trace for debugging
+            trace = result.get('trace', [])
+            logger.debug(f"Rule '{rule_name}': AI agent trace ({len(trace)} iterations)")
+
+        except Exception as e:
+            logger.error(f"Error executing run_ai_agent action: {e}", exc_info=True)
 
     async def run_once(self) -> None:
         """Run one evaluation cycle of all rules."""

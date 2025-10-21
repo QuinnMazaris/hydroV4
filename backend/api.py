@@ -792,6 +792,121 @@ async def capture_camera_frame(
     return frame
 
 
+@app.get("/api/automation/rules")
+async def get_automation_rules():
+    """Get all automation rules (proxied from gardener agent)."""
+    import httpx
+
+    gardener_url = os.getenv("GARDENER_API_URL", "http://localhost:8600")
+
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(f"{gardener_url}/automation/rules", timeout=10.0)
+            response.raise_for_status()
+            return response.json()
+    except httpx.HTTPError as e:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Failed to connect to gardener service: {str(e)}"
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to fetch automation rules: {str(e)}"
+        )
+
+
+@app.post("/api/automation/rules")
+async def create_automation_rule(rule: Dict[str, Any]):
+    """Create a new automation rule (proxied to gardener agent)."""
+    import httpx
+
+    gardener_url = os.getenv("GARDENER_API_URL", "http://localhost:8600")
+
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                f"{gardener_url}/automation/rules",
+                json=rule,
+                timeout=10.0
+            )
+            response.raise_for_status()
+            return response.json()
+    except httpx.HTTPError as e:
+        raise HTTPException(
+            status_code=e.response.status_code if hasattr(e, 'response') else 503,
+            detail=f"Gardener service error: {str(e)}"
+        )
+
+
+@app.patch("/api/automation/rules/{rule_id}")
+async def update_automation_rule(rule_id: str, rule: Dict[str, Any]):
+    """Update an automation rule (proxied to gardener agent)."""
+    import httpx
+
+    gardener_url = os.getenv("GARDENER_API_URL", "http://localhost:8600")
+
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.patch(
+                f"{gardener_url}/automation/rules/{rule_id}",
+                json=rule,
+                timeout=10.0
+            )
+            response.raise_for_status()
+            return response.json()
+    except httpx.HTTPError as e:
+        raise HTTPException(
+            status_code=e.response.status_code if hasattr(e, 'response') else 503,
+            detail=f"Gardener service error: {str(e)}"
+        )
+
+
+@app.delete("/api/automation/rules/{rule_id}")
+async def delete_automation_rule(rule_id: str):
+    """Delete an automation rule (proxied to gardener agent)."""
+    import httpx
+
+    gardener_url = os.getenv("GARDENER_API_URL", "http://localhost:8600")
+
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.delete(
+                f"{gardener_url}/automation/rules/{rule_id}",
+                timeout=10.0
+            )
+            response.raise_for_status()
+            return response.json()
+    except httpx.HTTPError as e:
+        raise HTTPException(
+            status_code=e.response.status_code if hasattr(e, 'response') else 503,
+            detail=f"Gardener service error: {str(e)}"
+        )
+
+
+@app.post("/api/automation/rules/{rule_id}/toggle")
+async def toggle_automation_rule(rule_id: str, toggle: Dict[str, bool]):
+    """Toggle an automation rule (proxied to gardener agent)."""
+    import httpx
+
+    gardener_url = os.getenv("GARDENER_API_URL", "http://localhost:8600")
+
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                f"{gardener_url}/automation/rules/{rule_id}/toggle",
+                json=toggle,
+                timeout=10.0
+            )
+            response.raise_for_status()
+            return response.json()
+    except httpx.HTTPError as e:
+        raise HTTPException(
+            status_code=e.response.status_code if hasattr(e, 'response') else 503,
+            detail=f"Gardener service error: {str(e)}"
+        )
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host=settings.api_host, port=settings.api_port)
