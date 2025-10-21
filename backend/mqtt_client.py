@@ -700,6 +700,14 @@ class MQTTClient:
                 label = f"Relay {relay_num}"
             label = label or relay_key
 
+            if metric is None:
+                logger.warning(
+                    'No metric registered for critical relay; skipping publish',
+                    device_id=device_id,
+                    relay_key=relay_key,
+                )
+                return
+
             success = await self._process_metric_reading(
                 device_id,
                 relay_key,
@@ -708,8 +716,6 @@ class MQTTClient:
                 label=label,
                 unit=unit,
             )
-            if not success:
-                return
 
             await event_broker.publish({
                 'type': 'reading',
