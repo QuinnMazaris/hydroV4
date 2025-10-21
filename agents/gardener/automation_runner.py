@@ -285,27 +285,30 @@ class AutomationEngine:
         rule_name = rule.get('name', 'unknown')
         rule_id = rule.get('id', 'unknown')
 
-        actions_executed = False
+        timestamp_recorded = False
 
         for action in actions:
             action_type = action.get('type')
 
+            executed = False
+
             if action_type == 'set_actuator':
-                await self._execute_set_actuator(action, rule_name)
-                actions_executed = True
+                executed = await self._execute_set_actuator(action, rule_name)
 
             elif action_type == 'run_ai_agent':
-                await self._execute_run_ai_agent(action, rule_name)
-                actions_executed = True
+                executed = await self._execute_run_ai_agent(action, rule_name)
 
             else:
                 logger.warning(f"Unknown action type: {action_type}")
 
-        if actions_executed:
-            # Mark rule as executed (for cron tracking)
-            self._rule_last_executed[rule_id] = datetime.now()
+            if executed and not timestamp_recorded:
+                # Mark rule as executed (for cron tracking) as soon as the first
+                # supported action completes. This prevents later failures from
+                # causing already-performed actions to repeat on the next run.
+                self._rule_last_executed[rule_id] = datetime.now()
+                timestamp_recorded = True
 
-    async def _execute_set_actuator(self, action: Dict[str, Any], rule_name: str) -> None:
+    async def _execute_set_actuator(self, action: Dict[str, Any], rule_name: str) -> bool:
         """Execute a set_actuator action.
 
         Args:
@@ -328,7 +331,7 @@ class AutomationEngine:
                     f"Skipping actuator {device_key}:{actuator_key} - "
                     f"mode is {actuator_mode}, not 'auto'"
                 )
-                return
+                return False
 
             # Get current state
             latest = await self.hydro_client.latest_readings()
@@ -345,7 +348,7 @@ class AutomationEngine:
                 logger.debug(
                     f"Actuator {device_key}:{actuator_key} already in state '{state}'"
                 )
-                return
+                return False
 
             # Send control command
             success = await self.hydro_client.control_actuator(
@@ -356,16 +359,19 @@ class AutomationEngine:
                 logger.info(
                     f"Rule '{rule_name}': Set {device_key}:{actuator_key} to '{state}'"
                 )
+                return True
             else:
                 logger.warning(
                     f"Rule '{rule_name}': Failed to set {device_key}:{actuator_key} "
                     f"to '{state}'"
                 )
+                return False
 
         except Exception as e:
             logger.error(f"Error executing set_actuator action: {e}")
+            return False
 
-    async def _execute_run_ai_agent(self, action: Dict[str, Any], rule_name: str) -> None:
+    async def _execute_run_ai_agent(self, action: Dict[str, Any], rule_name: str) -> bool:
         """Execute a run_ai_agent action.
 
         Args:
@@ -375,7 +381,7 @@ class AutomationEngine:
         try:
             if self.agent is None:
                 logger.error(f"Rule '{rule_name}': Cannot run AI agent - agent not initialized")
-                return
+                return False
 
             prompt = action.get('prompt', 'Analyze the current system state and recommend actions.')
             temperature = action.get('temperature', 0.3)
@@ -398,8 +404,11 @@ class AutomationEngine:
             trace = result.get('trace', [])
             logger.debug(f"Rule '{rule_name}': AI agent trace ({len(trace)} iterations)")
 
+            return True
+
         except Exception as e:
             logger.error(f"Error executing run_ai_agent action: {e}", exc_info=True)
+            return False
 
     async def run_once(self) -> None:
         """Run one evaluation cycle of all rules."""
