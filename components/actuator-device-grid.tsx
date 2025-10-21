@@ -1,3 +1,5 @@
+'use client'
+
 import { DeviceToggle } from "@/components/device-toggle"
 import { cn } from "@/lib/utils"
 import type { ActuatorState } from "@/hooks/use-actuator-queue"
