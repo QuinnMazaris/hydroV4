@@ -15,8 +15,7 @@ class Settings(BaseSettings):
     # Topic Configuration
     mqtt_base_topic: str = "esp32"
     sensor_data_topic: str = "esp32/data"
-    relay_status_topic: str = "esp32/relay/status"
-    relay_control_topic: str = ""  # Dynamic per-device: {mqtt_base_topic}/{device_id}/control
+    actuator_control_topic: str = ""  # Dynamic per-device: {mqtt_base_topic}/{device_id}/control
     discovery_request_topic: str = "esp32/discovery/request"
     discovery_response_topic: str = "esp32/+/discovery"
 

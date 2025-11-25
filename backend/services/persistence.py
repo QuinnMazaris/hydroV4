@@ -90,8 +90,8 @@ async def sync_device_metrics(
         normalized.append(
             {
                 "metric_key": key,
-                "display_name": (definition.get("display_name") or definition.get("label") or key) or key,
-                "unit": (definition.get("unit") or None) or None,
+                "display_name": definition.get("display_name") or definition.get("label") or key,
+                "unit": definition.get("unit"),
                 "metric_type": metric_type,
             }
         )

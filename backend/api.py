@@ -496,22 +496,36 @@ async def control_actuators_batch(
     batch: ActuatorBatchControl,
     db: AsyncSession = Depends(get_db),
 ):
-    """Batch actuator control - ONLY works for actuators in MANUAL mode."""
+    """Batch actuator control with mode-based permissions.
+    
+    Mode logic:
+    - AUTO mode: AI and automation can control. User blocked unless force=True.
+    - MANUAL mode: User can control. AI and automation blocked.
+    
+    This means AUTO is the normal operating mode where the system runs itself,
+    and MANUAL is the emergency override mode for human intervention.
+    """
     if not batch.commands:
         return {"processed": 0, "skipped": 0, "missing": [], "blocked": []}
+
+    source = batch.source.lower()
+    if source not in {"user", "ai", "automation"}:
+        source = "user"
 
     deduped: Dict[tuple[str, str], ActuatorCommand] = {}
     for command in batch.commands:
         device_id = command.device_id.strip()
-        actuator_key = command.actuator_key.strip()
-        if not device_id or not actuator_key:
+        # Normalize key: lowercase and remove spaces (e.g. "Relay 1" -> "relay1")
+        normalized_key = command.actuator_key.lower().replace(" ", "")
+        
+        if not device_id or not normalized_key:
             raise HTTPException(status_code=400, detail="Each command requires device_id and actuator_key")
         state = command.state.lower()
         if state not in {"on", "off"}:
-            raise HTTPException(status_code=400, detail=f"Invalid state '{command.state}' for actuator '{actuator_key}'")
-        deduped[(device_id, actuator_key)] = ActuatorCommand(
+            raise HTTPException(status_code=400, detail=f"Invalid state '{command.state}' for actuator '{command.actuator_key}'")
+        deduped[(device_id, normalized_key)] = ActuatorCommand(
             device_id=device_id,
-            actuator_key=actuator_key,
+            actuator_key=normalized_key,
             state=state,
         )
 
@@ -535,26 +549,56 @@ async def control_actuators_batch(
     missing = []
     blocked = []
 
+    # Check permissions based on mode and source
+    def is_allowed(mode: str, source: str, force: bool) -> tuple[bool, str]:
+        """Check if source is allowed to control actuator in given mode.
+        
+        AUTO mode = normal operation (AI + automation control)
+        MANUAL mode = emergency override (user control only)
+        """
+        if mode == 'auto':
+            # AUTO mode: AI and automation allowed, user blocked unless force
+            if source in ('ai', 'automation'):
+                return True, ""
+            elif source == 'user' and force:
+                return True, ""  # Emergency override
+            else:
+                return False, "Actuator is in AUTO mode (use force=true for emergency override)"
+        else:  # manual mode
+            # MANUAL mode: User allowed, AI and automation blocked
+            if source == 'user':
+                return True, ""
+            else:
+                return False, "Actuator is in MANUAL mode (user emergency override active)"
+
     # Categorize commands
     for device_id, actuator_key in pairs:
         if (device_id, actuator_key) not in valid_pairs:
             missing.append({"device_id": device_id, "actuator_key": actuator_key})
-        elif valid_pairs[(device_id, actuator_key)] == 'auto':
-            blocked.append({
-                "device_id": device_id,
-                "actuator_key": actuator_key,
-                "reason": "Actuator is in AUTO mode"
-            })
+        else:
+            mode = valid_pairs[(device_id, actuator_key)]
+            allowed, reason = is_allowed(mode, source, batch.force)
+            if not allowed:
+                blocked.append({
+                    "device_id": device_id,
+                    "actuator_key": actuator_key,
+                    "reason": reason,
+                    "mode": mode,
+                    "source": source
+                })
 
-    # Only process MANUAL mode actuators
+    # Process allowed commands
     device_commands: Dict[str, List[ActuatorControl]] = defaultdict(list)
     processed_details: List[Dict[str, Any]] = []
 
     for device_id, actuator_key in pairs:
         if (device_id, actuator_key) not in valid_pairs:
             continue
-        if valid_pairs[(device_id, actuator_key)] == 'auto':
-            continue  # Skip AUTO mode actuators
+        
+        mode = valid_pairs[(device_id, actuator_key)]
+        allowed, _ = is_allowed(mode, source, batch.force)
+        if not allowed:
+            continue
 
         command = deduped[(device_id, actuator_key)]
         control = ActuatorControl(actuator_key=command.actuator_key, state=command.state)
@@ -563,6 +607,7 @@ async def control_actuators_batch(
             "device_id": device_id,
             "actuator_key": actuator_key,
             "state": command.state,
+            "mode": mode,
         })
 
     # Publish to MQTT
@@ -575,6 +620,7 @@ async def control_actuators_batch(
         "missing": missing,
         "blocked": blocked,
         "details": processed_details,
+        "source": source,
     }
 
 
@@ -651,7 +697,7 @@ async def set_actuator_mode(
         select(Metric)
         .join(Device, Device.id == Metric.device_id)
         .where(Device.device_key == device_key)
-        .where(Metric.metric_key == actuator_key)
+        .where(Metric.metric_key == actuator_key.lower().replace(" ", ""))
         .where(Metric.metric_type == 'actuator')
     )
     metric = result.scalar_one_or_none()
@@ -770,8 +816,6 @@ async def get_camera_image(
     db: AsyncSession = Depends(get_db),
 ):
     """Get camera image - latest by default, or historical by days_ago parameter."""
-    from datetime import datetime, timedelta
-
     # Calculate target timestamp
     target_time = utc_now() - timedelta(days=days_ago)
 

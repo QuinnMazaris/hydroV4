@@ -191,7 +191,18 @@ class ActuatorCommand(BaseModel):
 
 
 class ActuatorBatchControl(BaseModel):
+    """Batch actuator control request.
+    
+    source: Who is making this request
+        - "user": Dashboard/UI (allowed in MANUAL mode only, unless force=True)
+        - "ai": AI agent chat (allowed in AUTO mode)
+        - "automation": Automation rules (allowed in AUTO mode)
+    
+    force: Override mode restrictions (for emergency user control in AUTO mode)
+    """
     commands: List[ActuatorCommand]
+    source: str = "user"  # "user", "ai", or "automation"
+    force: bool = False  # Emergency override for user in AUTO mode
 
 
 class CameraFrame(Base):

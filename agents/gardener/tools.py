@@ -79,8 +79,10 @@ class ToolRegistry:
                 "control_actuators": ToolSpec(
                     name="control_actuators",
                     description=(
-                        "Toggle actuators on hydro devices. Commands will be validated against "
-                        "known actuators before publishing."
+                        "Toggle actuators on hydro devices. Commands are subject to mode restrictions: "
+                        "AUTO mode = AI can control (normal operation), "
+                        "MANUAL mode = AI blocked (user emergency override). "
+                        "If a command is blocked, you'll see it in the 'blocked' response field."
                     ),
                     input_schema={
                         "type": "object",
@@ -278,6 +280,21 @@ class ToolRegistry:
                     },
                     handler=self._handle_toggle_automation_rule,
                 ),
+                "set_actuator_mode": ToolSpec(
+                    name="set_actuator_mode",
+                    description="Set the control mode (manual/auto) for a specific actuator.",
+                    input_schema={
+                        "type": "object",
+                        "properties": {
+                            "device_key": {"type": "string", "description": "Device key (e.g. hydro-station-1)"},
+                            "actuator_key": {"type": "string", "description": "Actuator key (e.g. relay1)"},
+                            "mode": {"type": "string", "enum": ["manual", "auto"], "description": "Control mode"}
+                        },
+                        "required": ["device_key", "actuator_key", "mode"],
+                        "additionalProperties": False,
+                    },
+                    handler=self._handle_set_actuator_mode,
+                ),
             }
 
     async def _handle_sensor_snapshot(self, args: Dict[str, Any]) -> Dict[str, Any]:
@@ -291,8 +308,16 @@ class ToolRegistry:
         }
 
     async def _handle_control_actuators(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Handle control_actuators tool call with AI source."""
         commands = args.get("commands", [])
-        result = await self._client.control_actuators(commands)
+        result = await self._client.control_actuators(commands, source="ai")
+        return result
+
+    async def _handle_set_actuator_mode(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        device_key = args["device_key"]
+        actuator_key = args["actuator_key"]
+        mode = args["mode"]
+        result = await self._client.set_actuator_mode(device_key, actuator_key, mode)
         return result
 
     async def _handle_get_camera_image(self, args: Dict[str, Any]) -> Dict[str, Any]:
@@ -368,24 +393,10 @@ class ToolRegistry:
         """Update an existing automation rule (AI protection enforced)."""
         rule_id = args["rule_id"]
 
-        # Check if rule is protected first
-        data = self._rule_manager.load_rules_file()
-        result = self._rule_manager.find_rule_by_id(data.get("rules", []), rule_id)
-
-        if result is None:
-            return {
-                "status": "error",
-                "message": f"Rule with ID '{rule_id}' not found"
-            }
-
-        _, rule = result
-
-        # AI cannot modify protected rules
-        if rule.get("protected", False):
-            return {
-                "status": "error",
-                "message": f"Rule '{rule.get('name')}' is protected and cannot be modified"
-            }
+        # Check if rule is accessible (exists and not protected)
+        error = self._check_protected_rule(rule_id, action="modif")
+        if error:
+            return error
 
         # AI cannot change protection status
         if "protected" in args:
@@ -411,24 +422,10 @@ class ToolRegistry:
         """Delete an automation rule (AI protection enforced)."""
         rule_id = args["rule_id"]
 
-        # Check if rule is protected first
-        data = self._rule_manager.load_rules_file()
-        result = self._rule_manager.find_rule_by_id(data.get("rules", []), rule_id)
-
-        if result is None:
-            return {
-                "status": "error",
-                "message": f"Rule with ID '{rule_id}' not found"
-            }
-
-        _, rule = result
-
-        # AI cannot delete protected rules
-        if rule.get("protected", False):
-            return {
-                "status": "error",
-                "message": f"Rule '{rule.get('name')}' is protected and cannot be deleted"
-            }
+        # Check if rule is accessible (exists and not protected)
+        error = self._check_protected_rule(rule_id, action="delete")
+        if error:
+            return error
 
         return self._rule_manager.delete_rule(rule_id, modified_by="llm_tool")
 
@@ -437,26 +434,36 @@ class ToolRegistry:
         rule_id = args["rule_id"]
         enabled = args["enabled"]
 
-        # Check if rule is protected first
+        # Check if rule is accessible (exists and not protected)
+        error = self._check_protected_rule(rule_id, action="toggle")
+        if error:
+            return error
+
+        return self._rule_manager.toggle_rule(rule_id, enabled, modified_by="llm_tool")
+
+    def _check_protected_rule(self, rule_id: str, action: str = "modify") -> Optional[Dict[str, Any]]:
+        """Check if a rule exists and is protected (for AI operations).
+        
+        Returns an error dict if the rule is not accessible, None if OK to proceed.
+        """
         data = self._rule_manager.load_rules_file()
         result = self._rule_manager.find_rule_by_id(data.get("rules", []), rule_id)
-
+        
         if result is None:
             return {
                 "status": "error",
                 "message": f"Rule with ID '{rule_id}' not found"
             }
-
+        
         _, rule = result
-
-        # AI cannot toggle protected rules
+        
         if rule.get("protected", False):
             return {
                 "status": "error",
-                "message": f"Rule '{rule.get('name')}' is protected and cannot be enabled/disabled"
+                "message": f"Rule '{rule.get('name')}' is protected and cannot be {action}d"
             }
-
-        return self._rule_manager.toggle_rule(rule_id, enabled, modified_by="llm_tool")
+        
+        return None
 
     def all(self) -> List[ToolSpec]:
         return list(self._tools.values())

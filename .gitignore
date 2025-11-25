@@ -27,6 +27,9 @@ yarn-error.log*
 next-env.d.ts
 hydro.db
 
+# camera frames
+/camera_frames/
+
 # camera data
 /backend/data/camera/
 *.webp

@@ -48,6 +48,7 @@ services:
       dockerfile: Dockerfile.gardener
     container_name: hydro-gardener
     network_mode: host
+    restart: unless-stopped
     environment:
       - GARDENER_HYDRO_API_BASE_URL=${GARDENER_HYDRO_API_BASE_URL:-http://127.0.0.1:8001}
       - GARDENER_API_PORT=${GARDENER_API_PORT:-8600}
@@ -59,7 +60,8 @@ services:
       - GARDENER_ACTUATOR_DRY_RUN=${GARDENER_ACTUATOR_DRY_RUN:-false}
       - GARDENER_REQUEST_LOG_SAMPLE_RATE=${GARDENER_REQUEST_LOG_SAMPLE_RATE:-1.0}
     depends_on:
-      - hydro-app
+      hydro-app:
+        condition: service_healthy
 
 volumes:
   hydro-data:

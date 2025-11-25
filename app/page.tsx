@@ -5,9 +5,8 @@ import { useEffect, useMemo, useState } from "react"
 
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
-import { Button } from "@/components/ui/button"
 import { LineChart, Line, XAxis, YAxis, ResponsiveContainer } from "recharts"
-import { Activity, ChevronRight, Bot } from "lucide-react"
+import { Activity, ChevronRight } from "lucide-react"
 
 import { describeValue, resolveMetricMeta } from "@/lib/metrics"
 import { useWsSensors } from "@/hooks/use-ws-metrics"
@@ -17,6 +16,7 @@ import { cn } from "@/lib/utils"
 import { ActuatorDeviceGrid } from "@/components/actuator-device-grid"
 import type { ActuatorCard } from "@/components/actuator-device-grid"
 import { normalizeActuatorState, useActuatorQueue } from "@/hooks/use-actuator-queue"
+import { AppHeader } from "@/components/app-header"
 
 interface MetricCardProps {
   title: string
@@ -94,8 +94,7 @@ export default function Dashboard() {
 
   type ActuatorInfo = ActuatorCard
 
-  // Global control mode state
-  const [globalMode, setGlobalMode] = useState<'auto' | 'manual'>('manual')
+  // Control modes for actuators (for display purposes)
   const [controlModes, setControlModes] = useState<Record<string, Record<string, 'auto' | 'manual'>>>({})
 
   const actuatorDevices = useMemo(() => {
@@ -133,58 +132,11 @@ export default function Dashboard() {
   useEffect(() => {
     fetch('/api/actuators/modes')
       .then(res => res.json())
-      .then(data => {
+      .then((data: { modes?: Record<string, Record<string, 'auto' | 'manual'>> }) => {
         setControlModes(data.modes || {})
-
-        // Determine global mode based on actuators
-        const allModes = Object.values(data.modes || {}).flatMap(device => Object.values(device))
-        if (allModes.length > 0) {
-          const allAuto = allModes.every((mode: string) => mode === 'auto')
-          setGlobalMode(allAuto ? 'auto' : 'manual')
-        }
       })
       .catch(err => console.error('Failed to fetch control modes:', err))
   }, [])
-
-  // Global mode toggle handler
-  const handleGlobalModeToggle = async () => {
-    const newMode = globalMode === 'manual' ? 'auto' : 'manual'
-
-    if (newMode === 'auto') {
-      const confirmed = window.confirm(
-        'Switch to AUTO mode?\n\nAutomation will take control of all relays based on configured rules.'
-      )
-      if (!confirmed) return
-    }
-
-    try {
-      const res = await fetch(`/api/actuators/mode/global?mode=${newMode}`, {
-        method: 'POST'
-      })
-
-      if (res.ok) {
-        setGlobalMode(newMode)
-
-        // Update all control modes locally
-        setControlModes(prev => {
-          const updated = { ...prev }
-          Object.keys(updated).forEach(deviceKey => {
-            Object.keys(updated[deviceKey]).forEach(actuatorKey => {
-              updated[deviceKey][actuatorKey] = newMode
-            })
-          })
-          return updated
-        })
-
-        console.log(`Switched to ${newMode.toUpperCase()} mode`)
-      } else {
-        throw new Error('Failed to change mode')
-      }
-    } catch (error) {
-      console.error('Error changing mode:', error)
-      alert('Failed to change control mode')
-    }
-  }
 
   const handleActuatorToggle = (deviceId: string, actuator: ActuatorInfo) => {
     console.log('Toggle clicked:', { deviceId, actuator })
@@ -193,10 +145,10 @@ export default function Dashboard() {
       return
     }
 
-    // Check if actuator is in AUTO mode
+    // Check if actuator is in AUTO mode - user can't control in AUTO mode
     const mode = controlModes[deviceId]?.[actuator.key] || 'manual'
     if (mode === 'auto') {
-      alert('This actuator is in AUTO mode.\n\nSwitch to MANUAL mode to control it manually.')
+      alert('This actuator is under AI control.\n\nUse the mode toggle in the header to switch to Manual Override.')
       return
     }
 
@@ -300,73 +252,9 @@ export default function Dashboard() {
       </div>
 
       <div className="relative z-10 flex min-h-screen flex-col">
-        {/* Header */}
-        <header className="border-b border-white/10 bg-black/30 backdrop-blur-md">
-          <div className="container mx-auto px-6 py-4">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center space-x-4">
-                <div className="flex items-center space-x-2">
-                  <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary">
-                    <Activity className="h-5 w-5 text-primary-foreground" />
-                  </div>
-                  <h1 className="text-xl font-semibold text-foreground">Hydro Dashboard</h1>
-                </div>
-                <Badge
-                  variant={status === "live" ? "secondary" : status === "connecting" ? "secondary" : "destructive"}
-                  className="text-xs backdrop-blur"
-                >
-                  {status === "live" ? "Live" : status === "connecting" ? "Connecting" : "Disconnected"}
-                </Badge>
-              </div>
-              <div className="flex items-center gap-2">
-                <a href="/chat">
-                  <Button variant="ghost" size="sm">
-                    Chat with AI
-                  </Button>
-                </a>
-                <a href="/automation">
-                  <Button variant="ghost" size="sm">
-                    Automation
-                  </Button>
-                </a>
-              </div>
-            </div>
-          </div>
-        </header>
+        <AppHeader connectionStatus={status} />
 
-        <div className="container mx-auto flex-1 px-6 py-8">
-          {/* Global Control Mode Toggle */}
-          <Card className="mb-6 border-white/10 bg-black/55 backdrop-blur-xl">
-            <CardHeader>
-              <div className="flex items-center justify-between">
-                <div className="flex-1">
-                  <CardTitle className="text-xl">
-                    Current Mode: <span className={globalMode === 'auto' ? 'text-blue-400' : 'text-gray-400'}>
-                      {globalMode === 'auto' ? 'AUTOMATIC' : 'MANUAL'}
-                    </span>
-                  </CardTitle>
-                  <p className="text-sm text-muted-foreground mt-1">
-                    {globalMode === 'auto'
-                      ? 'All relays are controlled by automation rules'
-                      : 'You have direct control of all relays'}
-                  </p>
-                </div>
-
-                <button
-                  onClick={handleGlobalModeToggle}
-                  className={cn(
-                    "px-6 py-3 rounded-lg font-semibold transition-all duration-200",
-                    globalMode === 'auto'
-                      ? "bg-gray-600 hover:bg-gray-700 text-white"
-                      : "bg-blue-600 hover:bg-blue-700 text-white"
-                  )}
-                >
-                  {globalMode === 'auto' ? 'Switch to Manual' : 'Switch to Auto'}
-                </button>
-              </div>
-            </CardHeader>
-          </Card>
-
+        <div className="flex-1 px-4 md:px-8 lg:px-12 py-8">
           {/* Camera Feeds - Dynamically loaded from MediaMTX */}
           <div className="mb-8 space-y-4">
             {cameraError && (
@@ -398,7 +286,7 @@ export default function Dashboard() {
           </div>
 
           {/* Metrics Grid */}
-          <div className="mb-8 grid grid-cols-1 gap-6 md:grid-cols-2 lg:grid-cols-3">
+          <div className="mb-8 grid grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
             {cards.map((c) => (
               <MetricCard
                 key={c.key}

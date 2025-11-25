@@ -121,7 +121,24 @@ class HydroAPIClient:
             readings[device_key] = parsed_metrics
         return readings
 
-    async def control_actuators(self, commands: List[Dict[str, Any]]) -> Dict[str, Any]:
+    async def control_actuators(
+        self, 
+        commands: List[Dict[str, Any]], 
+        *, 
+        source: str = "ai",
+        force: bool = False,
+    ) -> Dict[str, Any]:
+        """Control actuators with source-based permissions.
+        
+        Args:
+            commands: List of actuator commands
+            source: Who is making the request ("ai", "automation", "user")
+            force: Emergency override for user in AUTO mode
+            
+        Mode logic:
+            AUTO mode: AI and automation can control. User blocked unless force=True.
+            MANUAL mode: User can control. AI and automation blocked.
+        """
         if not commands:
             return {"processed": 0, "skipped": 0, "missing": []}
 
@@ -132,11 +149,16 @@ class HydroAPIClient:
                 "missing": [],
                 "details": commands,
                 "dry_run": True,
+                "source": source,
             }
 
         response = await self._client.post(
             "/api/actuators/batch-control",
-            json={"commands": commands},
+            json={
+                "commands": commands,
+                "source": source,
+                "force": force,
+            },
         )
         response.raise_for_status()
         return response.json()
@@ -197,28 +219,41 @@ class HydroAPIClient:
         *,
         device_keys: Optional[List[str]] = None,
     ) -> Dict[str, Dict[str, str]]:
-        """Get control modes for all actuators.
-
-        Args:
-            device_keys: Optional list of device keys to filter
-
-        Returns:
-            Dict mapping device_key -> actuator_key -> mode ('manual' or 'auto')
-        """
-        params: Dict[str, Any] = {}
+        """Get control modes for all actuators."""
+        params = {}
         if device_keys:
             params["device_keys"] = ",".join(device_keys)
 
         response = await self._client.get("/api/actuators/modes", params=params)
         response.raise_for_status()
-        payload = response.json()
-        return payload.get("modes", {})
+        return response.json().get("modes", {})
+
+    async def set_actuator_mode(
+        self,
+        device_key: str,
+        actuator_key: str,
+        mode: str,
+    ) -> Dict[str, Any]:
+        """Set control mode for a specific actuator."""
+        if mode not in ("manual", "auto"):
+            raise ValueError("Mode must be 'manual' or 'auto'")
+
+        response = await self._client.post(
+            f"/api/actuators/{device_key}/{actuator_key}/mode",
+            params={"mode": mode},
+        )
+        response.raise_for_status()
+        return response.json()
+
+
 
     async def control_actuator(
         self,
         device_key: str,
         actuator_key: str,
         state: str,
+        *,
+        source: str = "ai",
     ) -> bool:
         """Control a single actuator.
 
@@ -226,6 +261,7 @@ class HydroAPIClient:
             device_key: Device identifier
             actuator_key: Actuator/metric key
             state: Desired state (e.g., 'on', 'off')
+            source: Who is making the request ("ai", "automation", "user")
 
         Returns:
             True if successful, False otherwise
@@ -238,7 +274,7 @@ class HydroAPIClient:
             }
         ]
 
-        result = await self.control_actuators(commands)
+        result = await self.control_actuators(commands, source=source)
 
         # Check if command was processed successfully
         processed = result.get("processed", 0)

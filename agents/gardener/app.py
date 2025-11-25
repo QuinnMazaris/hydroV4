@@ -19,6 +19,10 @@ from .tools import ToolRegistry, build_tool_registry
 
 logger = logging.getLogger(__name__)
 
+# Shared rule manager instance (singleton pattern)
+_rules_path = Path(__file__).parent / 'data' / 'automation_rules.json'
+_rule_manager = RuleManager(_rules_path)
+
 app = FastAPI(title="Hydro Gardener", version="0.1.0")
 app.add_middleware(
     CORSMiddleware,
@@ -211,18 +215,13 @@ async def run_agent(
 @app.get("/automation/rules")
 async def list_automation_rules() -> Dict[str, Any]:
     """List all automation rules."""
-    rules_path = Path(__file__).parent / 'data' / 'automation_rules.json'
-    rule_manager = RuleManager(rules_path)
-    return rule_manager.list_rules()
+    return _rule_manager.list_rules()
 
 
 @app.post("/automation/rules")
 async def create_automation_rule(rule: AutomationRuleCreate) -> Dict[str, Any]:
     """Create a new automation rule (humans can create protected rules)."""
-    rules_path = Path(__file__).parent / 'data' / 'automation_rules.json'
-    rule_manager = RuleManager(rules_path)
-
-    result = rule_manager.create_rule(
+    result = _rule_manager.create_rule(
         name=rule.name,
         conditions=rule.conditions,
         actions=rule.actions,
@@ -242,10 +241,7 @@ async def create_automation_rule(rule: AutomationRuleCreate) -> Dict[str, Any]:
 @app.patch("/automation/rules/{rule_id}")
 async def update_automation_rule(rule_id: str, rule: AutomationRuleUpdate) -> Dict[str, Any]:
     """Update an existing automation rule (humans can edit protected rules)."""
-    rules_path = Path(__file__).parent / 'data' / 'automation_rules.json'
-    rule_manager = RuleManager(rules_path)
-
-    result = rule_manager.update_rule(
+    result = _rule_manager.update_rule(
         rule_id=rule_id,
         name=rule.name,
         description=rule.description,
@@ -266,10 +262,7 @@ async def update_automation_rule(rule_id: str, rule: AutomationRuleUpdate) -> Di
 @app.delete("/automation/rules/{rule_id}")
 async def delete_automation_rule(rule_id: str) -> Dict[str, Any]:
     """Delete an automation rule (humans can delete protected rules)."""
-    rules_path = Path(__file__).parent / 'data' / 'automation_rules.json'
-    rule_manager = RuleManager(rules_path)
-
-    result = rule_manager.delete_rule(rule_id, modified_by="api")
+    result = _rule_manager.delete_rule(rule_id, modified_by="api")
 
     if result.get("status") == "error":
         raise HTTPException(status_code=404, detail=result.get("message"))
@@ -280,10 +273,7 @@ async def delete_automation_rule(rule_id: str) -> Dict[str, Any]:
 @app.post("/automation/rules/{rule_id}/toggle")
 async def toggle_automation_rule(rule_id: str, toggle: AutomationRuleToggle) -> Dict[str, Any]:
     """Enable or disable an automation rule (humans can toggle protected rules)."""
-    rules_path = Path(__file__).parent / 'data' / 'automation_rules.json'
-    rule_manager = RuleManager(rules_path)
-
-    result = rule_manager.toggle_rule(rule_id, toggle.enabled, modified_by="api")
+    result = _rule_manager.toggle_rule(rule_id, toggle.enabled, modified_by="api")
 
     if result.get("status") == "error":
         raise HTTPException(status_code=404, detail=result.get("message"))

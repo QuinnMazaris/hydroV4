@@ -36,12 +36,15 @@ interface UseActuatorQueueOptions {
   actuatorsByDevice: ActuatorMap
   flushDelayMs?: number
   optimisticTimeoutMs?: number
+  /** Force override for controlling actuators in AUTO mode (emergency) */
+  forceOverride?: boolean
 }
 
 export const useActuatorQueue = ({
   actuatorsByDevice,
   flushDelayMs = 100,
   optimisticTimeoutMs = 5_000,
+  forceOverride = false,
 }: UseActuatorQueueOptions) => {
   const [optimisticActuatorStates, setOptimisticActuatorStates] = useState<Record<string, OptimisticEntry>>({})
 
@@ -83,11 +86,14 @@ export const useActuatorQueue = ({
           actuator_key: entry.actuatorKey,
           state: entry.nextState,
         })),
+        source: "user",
+        force: forceOverride,
       }
 
       console.log(
         "📡 Sending batch:",
-        body.commands.map((command) => `${command.actuator_key}→${command.state}`).join(", ")
+        body.commands.map((command) => `${command.actuator_key}→${command.state}`).join(", "),
+        forceOverride ? "(FORCE OVERRIDE)" : ""
       )
 
       const res = await fetch("/api/actuators/batch-control", {

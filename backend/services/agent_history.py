@@ -63,8 +63,6 @@ async def save_conversation_messages(
         await session.flush()
         if own_session:
             await session.commit()
-        else:
-            await session.flush()
 
         # Ensure all ORM instances have primary keys populated
         for message in orm_messages:
@@ -156,9 +154,5 @@ def to_conversation_response(message: ConversationMessage) -> ConversationMessag
         tool_calls=message.tool_calls,
         message_meta=message.message_meta,
     )
-
-
-
-
 
 

@@ -14,6 +14,11 @@ from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
 from croniter import croniter
 
+try:
+    import zoneinfo
+except ImportError:
+    from backports import zoneinfo  # Python < 3.9
+
 from .hydro_client import HydroAPIClient
 
 if TYPE_CHECKING:
@@ -59,6 +64,13 @@ class AutomationEngine:
             )
 
             self._last_load_time = datetime.now()
+            
+            # Clean up stale entries in _rule_last_executed for deleted rules
+            current_rule_ids = {rule.get('id') for rule in self.rules if rule.get('id')}
+            stale_ids = set(self._rule_last_executed.keys()) - current_rule_ids
+            for stale_id in stale_ids:
+                del self._rule_last_executed[stale_id]
+            
             logger.info(f"Loaded {len(self.rules)} automation rules")
 
         except Exception as e:
@@ -113,10 +125,14 @@ class AutomationEngine:
             return False
 
     def _evaluate_time_range(self, condition: Dict[str, Any]) -> bool:
-        """Check if current time is within the specified range."""
+        """Check if current time is within the specified range.
+        
+        Supports optional timezone field - defaults to local time if not specified.
+        """
         try:
             start_str = condition.get('start_time', '00:00')
             end_str = condition.get('end_time', '23:59')
+            tz_name = condition.get('timezone')
 
             # Parse time strings (HH:MM format)
             start_hour, start_min = map(int, start_str.split(':'))
@@ -125,7 +141,16 @@ class AutomationEngine:
             start_time = time(start_hour, start_min)
             end_time = time(end_hour, end_min)
 
-            current_time = datetime.now().time()
+            # Get current time in the specified timezone (or local if not specified)
+            if tz_name:
+                try:
+                    tz = zoneinfo.ZoneInfo(tz_name)
+                    current_time = datetime.now(tz).time()
+                except Exception as tz_err:
+                    logger.warning(f"Invalid timezone '{tz_name}', using local time: {tz_err}")
+                    current_time = datetime.now().time()
+            else:
+                current_time = datetime.now().time()
 
             # Handle overnight ranges (e.g., 22:00 to 06:00)
             if start_time <= end_time:
@@ -153,6 +178,8 @@ class AutomationEngine:
 
         Cron expressions follow standard format: minute hour day month weekday
         Example: "0 */2 * * *" = every 2 hours at the top of the hour
+        
+        Uses last_executed tracking to prevent double-firing within the same cron window.
         """
         try:
             expression = condition.get('expression')
@@ -172,13 +199,21 @@ class AutomationEngine:
             # Check if we haven't executed since the last scheduled time
             last_executed = self._rule_last_executed.get(rule_id)
 
-            # If never executed, or last execution was before the previous scheduled time
-            if last_executed is None or last_executed < prev_time:
-                # Check if the previous scheduled time is recent (within last evaluation cycle)
-                # This prevents executing multiple times for the same cron trigger
-                time_since_prev = (now - prev_time).total_seconds()
-                if time_since_prev < 60:  # Within last minute
-                    return True
+            # If we've already executed after this cron trigger, skip
+            if last_executed is not None and last_executed >= prev_time:
+                return False
+
+            # Check if the previous scheduled time is recent enough
+            # Use a tighter window to prevent edge cases
+            time_since_prev = (now - prev_time).total_seconds()
+            
+            # Only trigger if within 90 seconds of the scheduled time
+            # (allows for some clock drift but prevents running stale triggers)
+            if time_since_prev < 90:
+                # Immediately mark as executed to prevent double-firing
+                # This is a side-effect but necessary for correctness
+                self._rule_last_executed[rule_id] = now
+                return True
 
             return False
 
@@ -300,10 +335,8 @@ class AutomationEngine:
 
             else:
                 logger.warning(f"Unknown action type: {action_type}")
-
-        if actions_executed:
-            # Mark rule as executed (for cron tracking)
-            self._rule_last_executed[rule_id] = datetime.now()
+        
+        # Note: Cron execution is tracked in _evaluate_cron() to prevent double-firing
 
     async def _execute_set_actuator(self, action: Dict[str, Any], rule_name: str) -> None:
         """Execute a set_actuator action.
@@ -311,26 +344,27 @@ class AutomationEngine:
         Args:
             action: Action dictionary
             rule_name: Name of the rule (for logging)
+        
+        Mode logic: Automation rules can only control actuators in AUTO mode.
+        MANUAL mode means user has taken emergency control.
         """
         try:
             device_key = action.get('device_key')
             actuator_key = action.get('actuator_key')
             state = action.get('state')
 
-            # Get current control modes
+            # Get current control modes (local check for efficiency)
             modes = await self.hydro_client.get_actuator_modes()
-
-            # Check if actuator is in AUTO mode
             actuator_mode = modes.get(device_key, {}).get(actuator_key)
 
             if actuator_mode != 'auto':
                 logger.debug(
                     f"Skipping actuator {device_key}:{actuator_key} - "
-                    f"mode is {actuator_mode}, not 'auto'"
+                    f"mode is {actuator_mode}, not 'auto' (user has manual control)"
                 )
                 return
 
-            # Get current state
+            # Get current state to avoid redundant commands
             latest = await self.hydro_client.latest_readings()
             device_readings = latest.get(device_key, [])
 
@@ -347,9 +381,9 @@ class AutomationEngine:
                 )
                 return
 
-            # Send control command
+            # Send control command with source="automation"
             success = await self.hydro_client.control_actuator(
-                device_key, actuator_key, state
+                device_key, actuator_key, state, source="automation"
             )
 
             if success:
@@ -359,7 +393,7 @@ class AutomationEngine:
             else:
                 logger.warning(
                     f"Rule '{rule_name}': Failed to set {device_key}:{actuator_key} "
-                    f"to '{state}'"
+                    f"to '{state}' (may have been blocked by mode change)"
                 )
 
         except Exception as e:
