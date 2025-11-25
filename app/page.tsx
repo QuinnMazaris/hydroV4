@@ -5,8 +5,9 @@ import { useEffect, useMemo, useState } from "react"
 
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
+import { Button } from "@/components/ui/button"
 import { LineChart, Line, XAxis, YAxis, ResponsiveContainer } from "recharts"
-import { Activity, ChevronRight } from "lucide-react"
+import { Activity, ChevronRight, Bot } from "lucide-react"
 
 import { describeValue, resolveMetricMeta } from "@/lib/metrics"
 import { useWsSensors } from "@/hooks/use-ws-metrics"
@@ -317,7 +318,18 @@ export default function Dashboard() {
                   {status === "live" ? "Live" : status === "connecting" ? "Connecting" : "Disconnected"}
                 </Badge>
               </div>
-              <div />
+              <div className="flex items-center gap-2">
+                <a href="/chat">
+                  <Button variant="ghost" size="sm">
+                    Chat with AI
+                  </Button>
+                </a>
+                <a href="/automation">
+                  <Button variant="ghost" size="sm">
+                    Automation
+                  </Button>
+                </a>
+              </div>
             </div>
           </div>
         </header>

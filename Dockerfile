@@ -17,6 +17,7 @@ COPY hooks ./hooks
 COPY lib ./lib
 COPY public ./public
 COPY styles ./styles
+COPY config ./config
 COPY next.config.mjs ./
 COPY tsconfig.json ./
 COPY postcss.config.mjs ./
@@ -81,8 +82,8 @@ EXPOSE ${PORT:-3001} ${API_PORT:-8001}
 
 # Create startup script that uses PORT variable
 RUN echo '#!/bin/bash\n\
-cd /app && python -m backend &\n\
-cd /app/frontend && npm start -- -p ${PORT:-3001} &\n\
-wait' > /app/start.sh && chmod +x /app/start.sh
+    cd /app && alembic -c backend/alembic.ini upgrade head && python -m backend &\n\
+    cd /app/frontend && npm start -- -p ${PORT:-3001} &\n\
+    wait' > /app/start.sh && chmod +x /app/start.sh
 
 CMD ["/app/start.sh"]

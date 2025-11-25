@@ -8,7 +8,7 @@ actuators in AUTO mode.
 import asyncio
 import json
 import logging
-from datetime import datetime, time
+from datetime import datetime, time, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
@@ -295,7 +295,7 @@ class AutomationEngine:
                 actions_executed = True
 
             elif action_type == 'run_ai_agent':
-                await self._execute_run_ai_agent(action, rule_name)
+                await self._execute_run_ai_agent(action, rule_name, rule_id)
                 actions_executed = True
 
             else:
@@ -365,12 +365,18 @@ class AutomationEngine:
         except Exception as e:
             logger.error(f"Error executing set_actuator action: {e}")
 
-    async def _execute_run_ai_agent(self, action: Dict[str, Any], rule_name: str) -> None:
+    async def _execute_run_ai_agent(
+        self,
+        action: Dict[str, Any],
+        rule_name: str,
+        rule_id: Optional[str] = None,
+    ) -> None:
         """Execute a run_ai_agent action.
 
         Args:
             action: Action dictionary containing prompt and agent parameters
             rule_name: Name of the rule (for logging)
+            rule_id: Identifier of the rule (if available)
         """
         try:
             if self.agent is None:
@@ -397,6 +403,51 @@ class AutomationEngine:
             # Log the agent trace for debugging
             trace = result.get('trace', [])
             logger.debug(f"Rule '{rule_name}': AI agent trace ({len(trace)} iterations)")
+
+            # Persist conversation history
+            try:
+                now = datetime.now(timezone.utc)
+                tool_calls: List[Dict[str, Any]] = []
+                for entry in trace:
+                    assistant_block = entry.get("assistant") or {}
+                    for call in assistant_block.get("tool_calls") or []:
+                        tool_calls.append(call)
+
+                conversation_payloads = [
+                    {
+                        "source": "automated",
+                        "role": "user",
+                        "content": prompt,
+                        "timestamp": now,
+                        "rule_id": rule_id,
+                        "rule_name": rule_name,
+                        "metadata": {
+                            "action": "run_ai_agent",
+                            "temperature": temperature,
+                            "max_iterations": max_iterations,
+                        },
+                    },
+                    {
+                        "source": "automated",
+                        "role": "assistant",
+                        "content": result.get("final", ""),
+                        "timestamp": datetime.now(timezone.utc),
+                        "rule_id": rule_id,
+                        "rule_name": rule_name,
+                        "tool_calls": tool_calls or None,
+                        "metadata": {
+                            "trace": trace,
+                        },
+                    },
+                ]
+
+                await self.hydro_client.save_conversation_messages(conversation_payloads)
+            except Exception as history_exc:  # pragma: no cover - defensive logging
+                logger.warning(
+                    "Rule '%s': Failed to record conversation history: %s",
+                    rule_name,
+                    history_exc,
+                )
 
         except Exception as e:
             logger.error(f"Error executing run_ai_agent action: {e}", exc_info=True)

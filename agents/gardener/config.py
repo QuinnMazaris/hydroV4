@@ -37,7 +37,7 @@ class Settings(BaseSettings):
     hydro_api_base_url: str = Field(
         "http://127.0.0.1:8001", description="Base URL for the hydro backend FastAPI service"
     )
-    hydro_api_timeout_seconds: float = Field(10.0, description="HTTP timeout for hydro backend requests")
+    hydro_api_timeout_seconds: float = Field(30.0, description="HTTP timeout for hydro backend requests")
 
     llm_provider: LLMProviderName = Field("mock", description="Primary LLM provider to use for agent runs")
     openai_api_key: Optional[str] = Field(default=None, description="API key for OpenAI-compatible models")

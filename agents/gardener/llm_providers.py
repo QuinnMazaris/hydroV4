@@ -18,6 +18,7 @@ class ChatMessage:
     content: str
     name: Optional[str] = None
     tool_calls: Optional[List[Dict[str, Any]]] = None
+    tool_call_id: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:  # pragma: no cover - trivial
         data: Dict[str, Any] = {"role": self.role, "content": self.content}
@@ -25,6 +26,8 @@ class ChatMessage:
             data["name"] = self.name
         if self.tool_calls:
             data["tool_calls"] = self.tool_calls
+        if self.tool_call_id:
+            data["tool_call_id"] = self.tool_call_id
         return data
 
 
@@ -103,7 +106,7 @@ class _BaseHTTPProvider(LLMProvider):
 
     def __init__(self, *, api_key: str, model: str) -> None:
         self._api_key = api_key
-        self._client = httpx.AsyncClient()
+        self._client = httpx.AsyncClient(timeout=60.0)
         self.model = model
 
     async def aclose(self) -> None:
@@ -131,7 +134,9 @@ class _BaseHTTPProvider(LLMProvider):
             headers=self._build_headers(),
             json=payload,
         )
-        response.raise_for_status()
+        if response.status_code != 200:
+            error_body = response.text
+            raise RuntimeError(f"OpenAI API error {response.status_code}: {error_body}")
         data = response.json()
         choice = data["choices"][0]
         message = choice["message"]

@@ -5,6 +5,7 @@ import base64
 import json
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Dict, Iterable, List, Optional
 
 import httpx
@@ -242,6 +243,30 @@ class HydroAPIClient:
         # Check if command was processed successfully
         processed = result.get("processed", 0)
         return processed > 0
+
+    async def save_conversation_messages(
+        self,
+        messages: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """Persist conversation messages via the backend API."""
+
+        if not messages:
+            return []
+
+        payload: List[Dict[str, Any]] = []
+        for message in messages:
+            serialised = dict(message)
+            timestamp = serialised.get("timestamp")
+            if isinstance(timestamp, datetime):
+                serialised["timestamp"] = timestamp.isoformat()
+            created_at = serialised.get("created_at")
+            if isinstance(created_at, datetime):
+                serialised["created_at"] = created_at.isoformat()
+            payload.append(serialised)
+
+        response = await self._client.post("/api/conversations", json=payload)
+        response.raise_for_status()
+        return response.json()
 
 
 @asynccontextmanager

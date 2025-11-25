@@ -24,14 +24,15 @@ class GardenerAgent:
         registry: ToolRegistry,
         *,
         system_prompt: str = DEFAULT_SYSTEM_PROMPT,
-        max_iterations: int = 6,
+        max_iterations: int = 20,
     ) -> None:
         self._provider = provider
         self._registry = registry
         self._system_prompt = system_prompt
         self._max_iterations = max_iterations
 
-    async def run(self, *, messages: Sequence[Dict[str, str] | ChatMessage], temperature: float = 0.2) -> Dict[str, Any]:
+    async def run(self, *, messages: Sequence[Dict[str, str] | ChatMessage], temperature: float = 0.2, max_iterations: int | None = None) -> Dict[str, Any]:
+        limit = max_iterations if max_iterations is not None else self._max_iterations
         provider_messages: List[ChatMessage] = [ChatMessage(role="system", content=self._system_prompt)]
         provider_messages.extend(self._coerce_messages(messages))
 
@@ -39,7 +40,7 @@ class GardenerAgent:
         tool_specs = self._registry.all()
         trace: List[Dict[str, Any]] = []
 
-        for iteration in range(self._max_iterations):
+        for iteration in range(limit):
             response = await self._provider.complete(provider_messages, tool_specs, temperature=temperature)
             provider_messages.append(response.message)
             trace.append(
@@ -106,6 +107,7 @@ class GardenerAgent:
                     role="tool",
                     name=call.name,
                     content=json.dumps(result, ensure_ascii=False),
+                    tool_call_id=call.id,
                 )
             )
 

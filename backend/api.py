@@ -20,6 +20,7 @@ from .models import (
     ActuatorBatchControl, ActuatorCommand, ActuatorControl,
     Device, DeviceResponse, Metric, Reading,
     CameraFrame, CameraFrameResponse,
+    ConversationMessageCreate, ConversationMessageResponse,
     LatestMetricSnapshot, LatestReadingsResponse,
     HistoricalReading, HistoricalReadingsResponse,
     MetricStatistics,
@@ -32,6 +33,12 @@ from .services.history import (
     _summarize_metric_series,
 )
 from .services.persistence import delete_old_readings, mark_devices_inactive
+from .services.agent_history import (
+    get_conversation_messages,
+    get_recent_automated_highlights,
+    save_conversation_messages,
+    to_conversation_response,
+)
 from .services.camera_sync import sync_cameras_to_db
 from .services.frame_capture import capture_all_cameras, cleanup_old_frames, capture_frame_for_camera
 from .utils.time import epoch_millis, utc_now
@@ -204,6 +211,9 @@ async def _latest_metric_rows(
         query = query.where(Device.device_key.in_(device_keys))
     if metric_keys:
         query = query.where(Metric.metric_key.in_(metric_keys))
+    
+    # Only show active metrics
+    query = query.where(Metric.is_active == True)
 
     result = await db.execute(query)
     return result.all()
@@ -236,6 +246,7 @@ async def build_initial_snapshot():
                     Metric.unit,
                     Metric.metric_type,
                 ).join(Metric, Metric.device_id == Device.id)
+                .where(Metric.is_active == True)
             )
             for device_key, metric_key, display_name, unit, metric_type in metric_rows:
                 entry = devices.setdefault(
@@ -714,6 +725,39 @@ async def health_check():
         "mqtt_connected": mqtt_client.is_connected,
         "timestamp": utc_now()
     }
+
+
+# ---------------- Conversation Endpoints ---------------- #
+
+
+@app.post("/api/conversations", response_model=List[ConversationMessageResponse])
+async def create_conversation_messages(
+    messages: List[ConversationMessageCreate],
+):
+    """Store one or more conversation messages."""
+
+    saved = await save_conversation_messages(messages)
+    return [to_conversation_response(message) for message in saved]
+
+
+@app.get("/api/conversations", response_model=List[ConversationMessageResponse])
+async def list_conversation_messages(
+    limit: int = Query(100, ge=1, le=500),
+    since: Optional[datetime] = Query(None),
+    source: Optional[str] = Query(None, pattern="^(automated|manual)$"),
+):
+    """Return conversation history sorted chronologically."""
+
+    messages = await get_conversation_messages(limit=limit, since=since, source=source)
+    return [to_conversation_response(message) for message in messages]
+
+
+@app.get("/api/conversations/highlights", response_model=List[ConversationMessageResponse])
+async def conversation_highlights(limit: int = Query(5, ge=1, le=20)):
+    """Return recent automated assistant messages for dashboard highlights."""
+
+    messages = await get_recent_automated_highlights(limit=limit)
+    return [to_conversation_response(message) for message in messages]
 
 
 # ---------------- Camera Frame Endpoints ---------------- #

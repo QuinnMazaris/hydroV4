@@ -35,8 +35,8 @@ async def upsert_device(
                 device.name = name
             if description is not None and description != device.description:
                 device.description = description
-            if metadata is not None and metadata != device.device_metadata:
-                device.device_metadata = metadata
+            if metadata is not None and metadata != device.device_meta:
+                device.device_meta = metadata
             if device_type and device.device_type != device_type:
                 device.device_type = device_type
         else:
@@ -44,7 +44,7 @@ async def upsert_device(
                 device_key=device_key,
                 name=name,
                 description=description,
-                device_metadata=metadata,
+                device_meta=metadata,
                 last_seen=touch_time,
                 is_active=True,
                 device_type=device_type,
@@ -122,6 +122,9 @@ async def sync_device_metrics(
                 if metric.metric_type != item["metric_type"]:
                     metric.metric_type = item["metric_type"]
                     updated = True
+                if not metric.is_active:
+                    metric.is_active = True
+                    updated = True
                 if updated:
                     session.add(metric)
             else:
@@ -131,9 +134,16 @@ async def sync_device_metrics(
                     display_name=item["display_name"],
                     unit=item["unit"],
                     metric_type=item["metric_type"],
+                    is_active=True,
                 )
                 session.add(metric)
                 existing[item["metric_key"]] = metric
+
+        # Mark metrics not in the new definition list as inactive
+        for key, metric in existing.items():
+            if key not in keys and metric.is_active:
+                metric.is_active = False
+                session.add(metric)
 
         await session.commit()
 
@@ -181,7 +191,7 @@ async def get_metric_map(device_key: str) -> Dict[str, Metric]:
         result = await session.execute(
             select(Metric)
             .join(Device, Metric.device_id == Device.id)
-            .where(Device.device_key == device_key)
+            .where((Device.device_key == device_key) & (Metric.is_active == True))
         )
         metrics = result.scalars().all()
         return {metric.metric_key: metric for metric in metrics}

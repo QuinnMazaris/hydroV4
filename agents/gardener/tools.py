@@ -244,7 +244,7 @@ class ToolRegistry:
                             "enabled": {"type": "boolean", "description": "Enable/disable rule"},
                             "priority": {"type": "integer", "description": "New rule priority"},
                             "conditions": {"type": "object", "description": "New conditions"},
-                            "actions": {"type": "array", "description": "New actions"}
+                            "actions": {"type": "array", "description": "New actions", "items": {"type": "object"}}
                         },
                         "required": ["rule_id"],
                         "additionalProperties": False,

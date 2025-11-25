@@ -97,6 +97,7 @@ class MQTTClient:
         *,
         label: Optional[str] = None,
         unit: Optional[str] = None,
+        metric_type: str = 'sensor',
     ) -> Optional[int]:
         cache = self.metric_cache.setdefault(device_key, {})
         if metric_key in cache:
@@ -104,15 +105,23 @@ class MQTTClient:
 
         metric = await get_metric_by_key(device_key, metric_key)
         if metric:
-            cache[metric_key] = metric.id
-            self.device_db_ids.setdefault(device_key, metric.device_id)
-            return metric.id
+            # If metric exists but type is wrong, we might want to update it,
+            # but _ensure_metric_id is primarily for ID lookup.
+            # However, if we are explicitly registering an actuator, we should ensure it's an actuator.
+            if metric_type == 'actuator' and metric.metric_type != 'actuator':
+                 # Force update via sync
+                 pass
+            else:
+                cache[metric_key] = metric.id
+                self.device_db_ids.setdefault(device_key, metric.device_id)
+                return metric.id
 
         definitions = [
             {
                 'metric_key': metric_key,
                 'display_name': label or metric_key,
                 'unit': unit or None,
+                'metric_type': metric_type,
             }
         ]
         metrics = await self._sync_metric_definitions(device_key, definitions)
@@ -198,6 +207,7 @@ class MQTTClient:
             settings.relay_status_topic: self._handle_relay_status,
             "esp32/critical_relays": self._handle_critical_relays,
             "esp32/status": self._handle_device_status_msg,
+            "rpi/broadcast": self._handle_rpi_broadcast,
         }
 
     async def _touch_device(
@@ -413,6 +423,7 @@ class MQTTClient:
                 (f"{settings.mqtt_base_topic}/+/heartbeat", settings.mqtt_qos),  # Device heartbeat responses
                 (f"{settings.mqtt_base_topic}/+/relay/status", settings.mqtt_qos),  # Device-specific relay status
                 (f"{settings.mqtt_base_topic}/+/actuators", settings.mqtt_qos),  # Device-specific actuator state
+                ("rpi/broadcast", settings.mqtt_qos),  # Legacy/RPi broadcast
             ]
 
             for topic, qos in topics:
@@ -524,6 +535,7 @@ class MQTTClient:
         *,
         label: Optional[str] = None,
         unit: Optional[str] = None,
+        metric_type: str = 'sensor',
     ) -> bool:
         """
         Process a single metric reading: ensure metric exists, insert reading, update cache.
@@ -534,6 +546,7 @@ class MQTTClient:
             metric_key,
             label=label,
             unit=unit,
+            metric_type=metric_type,
         )
         if metric_id is None:
             logger.warning(
@@ -634,8 +647,12 @@ class MQTTClient:
                         relay_num = None
 
                 metric = metric_map.get(relay_key)
-                label = metric.display_name if metric and metric.display_name else None
-                unit = metric.unit if metric and metric.unit else ''
+                if not metric:
+                    # Skip metrics that are not active/registered
+                    continue
+
+                label = metric.display_name if metric.display_name else None
+                unit = metric.unit if metric.unit else ''
                 if not label and relay_num is not None:
                     label = f"Relay {relay_num}"
                 label = label or relay_key
@@ -736,6 +753,55 @@ class MQTTClient:
 
         except Exception as exc:
             logger.error(f"Error handling device status: {exc}")
+
+    async def _handle_rpi_broadcast(self, topic: str, data: Dict[str, Any]):
+        """Handle legacy RPi broadcast messages and map to hydro-station-1."""
+        try:
+            # Hardcoded mapping to hydro-station-1 as per user setup analysis
+            device_id = "hydro-station-1"
+            timestamp = utc_now()
+            
+            # Ensure device exists
+            device = await self._touch_device(device_id, last_seen=timestamp)
+            
+            relay_values: Dict[str, Any] = {}
+            for key, value in data.items():
+                if key.startswith('relay'):
+                    relay_values[key] = value
+            
+            if not relay_values:
+                return
+
+            for relay_key, value in relay_values.items():
+                # Infer label
+                try:
+                    relay_num = int(relay_key.replace('relay', ''))
+                    label = f"Relay {relay_num}"
+                except ValueError:
+                    label = relay_key
+
+                await self._process_metric_reading(
+                    device_id,
+                    relay_key,
+                    value,
+                    timestamp,
+                    label=label,
+                    unit='',
+                    metric_type='actuator',
+                )
+
+            await event_broker.publish({
+                'type': 'reading',
+                'device_id': device_id,
+                'timestamp': epoch_millis(timestamp),
+                'actuators': relay_values,
+            })
+            
+            await self._publish_device_event(device)
+            logger.debug(f"Processed RPi broadcast for {device_id}: {relay_values}")
+
+        except Exception as exc:
+            logger.error(f"Error handling RPi broadcast: {exc}")
 
     async def _handle_dynamic_topic(self, topic: str, data: Dict[str, Any]):
         """Handle dynamic device topics for autodiscovery and status updates."""

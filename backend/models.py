@@ -1,4 +1,5 @@
 from datetime import datetime
+from enum import Enum as PyEnum
 from typing import Any, Dict, List, Literal, Optional, Union
 
 from sqlalchemy import (
@@ -6,6 +7,7 @@ from sqlalchemy import (
     Boolean,
     Column,
     DateTime,
+    Enum,
     ForeignKey,
     Index,
     Integer,
@@ -16,7 +18,7 @@ from sqlalchemy import (
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_serializer
 
 from .utils.time import utc_now
 
@@ -33,7 +35,7 @@ class Device(Base):
     last_seen = Column(DateTime(timezone=True), default=utc_now, nullable=False)
     is_active = Column(Boolean, default=True, nullable=False)
     device_type = Column(String(50), default='mqtt_sensor', nullable=False)  # 'mqtt_sensor', 'camera', etc
-    device_metadata = Column(Text, nullable=True)  # JSON string for device-specific data
+    device_meta = Column(Text, nullable=True)  # JSON string for device-specific data
     created_at = Column(DateTime(timezone=True), default=utc_now, nullable=False)
 
     metrics = relationship(
@@ -54,6 +56,7 @@ class Metric(Base):
     unit = Column(String(50), nullable=True)
     metric_type = Column(String(20), nullable=False)  # 'sensor' or 'actuator'
     control_mode = Column(String(20), default='manual', nullable=True)  # 'manual' or 'auto' (NULL for sensors)
+    is_active = Column(Boolean, default=True, nullable=False)
     created_at = Column(DateTime(timezone=True), default=utc_now, nullable=False)
 
     device = relationship("Device", back_populates="metrics")
@@ -86,6 +89,35 @@ class Reading(Base):
     )
 
 
+class ConversationSource(str, PyEnum):
+    AUTOMATED = "automated"
+    MANUAL = "manual"
+
+
+class ConversationRole(str, PyEnum):
+    USER = "user"
+    ASSISTANT = "assistant"
+
+
+class ConversationMessage(Base):
+    __tablename__ = "conversation_messages"
+
+    id = Column(Integer, primary_key=True, index=True)
+    timestamp = Column(DateTime(timezone=True), default=utc_now, nullable=False, index=True)
+    source = Column(Enum(ConversationSource, name="conversation_source"), nullable=False, index=True)
+    role = Column(Enum(ConversationRole, name="conversation_role"), nullable=False)
+    content = Column(Text, nullable=False)
+    rule_id = Column(String(100), nullable=True, index=True)
+    rule_name = Column(String(200), nullable=True)
+    tool_calls = Column(JSON, nullable=True)
+    message_meta = Column(JSON, nullable=True)
+    created_at = Column(DateTime(timezone=True), default=utc_now, nullable=False)
+
+    __table_args__ = (
+        Index("ix_conversation_messages_source_ts", "source", "timestamp"),
+    )
+
+
 JsonPrimitive = Union[str, int, float, bool, None]
 JsonValue = Union[JsonPrimitive, Dict[str, Any], List[Any]]
 
@@ -94,7 +126,7 @@ class DeviceBase(BaseModel):
     device_key: str = Field(..., description="Unique external identifier for the device")
     name: Optional[str] = None
     description: Optional[str] = None
-    device_metadata: Optional[str] = None
+    device_meta: Optional[str] = None
     device_type: str = Field(default='mqtt_sensor')
 
 
@@ -251,3 +283,35 @@ class HistoricalReadingsResponse(BaseModel):
     returned_points: int
     aggregated: bool = False
     statistics: Optional[Dict[str, List[MetricStatistics]]] = None
+
+
+class ConversationMessageBase(BaseModel):
+    source: Literal[ConversationSource.AUTOMATED.value, ConversationSource.MANUAL.value]
+    role: Literal[ConversationRole.USER.value, ConversationRole.ASSISTANT.value]
+    content: str
+    timestamp: Optional[datetime] = None
+    rule_id: Optional[str] = None
+    rule_name: Optional[str] = None
+    tool_calls: Optional[List[Dict[str, Any]]] = None
+    message_meta: Optional[Dict[str, Any]] = None
+
+
+class ConversationMessageCreate(ConversationMessageBase):
+    pass
+
+
+class ConversationMessageResponse(ConversationMessageBase):
+    id: int
+    timestamp: datetime
+    created_at: datetime
+
+    @field_serializer('timestamp', 'created_at')
+    def serialize_dt(self, dt: datetime, _info):
+        """Serialize datetime as ISO8601 with Z suffix for UTC."""
+        if dt.tzinfo is None:
+            # Assume naive datetime is UTC
+            return dt.isoformat() + 'Z'
+        return dt.isoformat()
+
+    class Config:
+        from_attributes = True

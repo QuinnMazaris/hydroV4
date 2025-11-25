@@ -1,6 +1,8 @@
 """FastAPI application exposing the gardener agent HTTP facade."""
 from __future__ import annotations
 
+import logging
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
 
@@ -15,6 +17,8 @@ from .llm_providers import ChatMessage, create_provider
 from .rule_manager import RuleManager
 from .tools import ToolRegistry, build_tool_registry
 
+logger = logging.getLogger(__name__)
+
 app = FastAPI(title="Hydro Gardener", version="0.1.0")
 app.add_middleware(
     CORSMiddleware,
@@ -27,12 +31,16 @@ app.add_middleware(
 
 class ChatMessagePayload(BaseModel):
     role: str = Field(description="Role of the message, e.g. user or assistant")
-    content: str = Field(description="Message content")
+    content: Optional[str] = Field(None, description="Message content")
+    name: Optional[str] = Field(None, description="Name of the author (optional)")
+    tool_calls: Optional[List[Dict[str, Any]]] = Field(None, description="Tool calls if any")
+    tool_call_id: Optional[str] = Field(None, description="Tool call ID if this is a tool output")
 
 
 class AgentRunRequest(BaseModel):
     messages: Sequence[ChatMessagePayload]
     temperature: float = Field(default=0.2, ge=0.0, le=2.0)
+    max_iterations: int = Field(default=20, ge=1, le=50)
 
 
 class AgentRunResponse(BaseModel):
@@ -129,12 +137,73 @@ async def list_tools(registry: ToolRegistry = Depends(get_registry)) -> Dict[str
 
 @app.post("/agent/run", response_model=AgentRunResponse)
 async def run_agent(
-    request: AgentRunRequest,
+    payload: AgentRunRequest,
+    http_request: Request,
     agent: GardenerAgent = Depends(get_agent),
 ) -> AgentRunResponse:
-    messages = [ChatMessage(role=msg.role, content=msg.content) for msg in request.messages]
-    result = await agent.run(messages=messages, temperature=request.temperature)
-    return AgentRunResponse(**result)
+    messages = [
+        ChatMessage(
+            role=msg.role,
+            content=msg.content or "",
+            name=msg.name,
+            tool_calls=msg.tool_calls,
+            tool_call_id=msg.tool_call_id,
+        )
+        for msg in payload.messages
+    ]
+    # Create a new agent instance with the requested max_iterations
+    # We need to recreate it because max_iterations is set at init time in the current design
+    # Alternatively, we can pass it to run() if we update the method signature. 
+    # Let's update agent.run() signature in the next step. For now, we'll assume we can pass it.
+    # Wait, looking at agent.py, max_iterations is an __init__ param, not a run() param.
+    # I should update agent.py first to accept max_iterations in run() or use the init value.
+    # Let's actually update agent.py's run method to accept max_iterations override.
+    result = await agent.run(messages=messages, temperature=payload.temperature, max_iterations=payload.max_iterations)
+
+    response = AgentRunResponse(**result)
+
+    hydro_client: HydroAPIClient | None = getattr(http_request.app.state, "client", None)
+    if hydro_client:
+        try:
+            events: List[Dict[str, Any]] = []
+            if payload.messages:
+                last_message = payload.messages[-1]
+                events.append(
+                    {
+                        "source": "manual",
+                        "role": last_message.role,
+                        "content": last_message.content,
+                        "timestamp": datetime.now(timezone.utc),
+                        "metadata": {
+                            "temperature": payload.temperature,
+                            "message_count": len(payload.messages),
+                        },
+                    }
+                )
+
+            tool_calls: List[Dict[str, Any]] = []
+            for entry in result.get("trace", []):
+                assistant_block = entry.get("assistant") or {}
+                tool_calls.extend(assistant_block.get("tool_calls") or [])
+
+            events.append(
+                {
+                    "source": "manual",
+                    "role": "assistant",
+                    "content": result.get("final", ""),
+                    "timestamp": datetime.now(timezone.utc),
+                    "tool_calls": tool_calls or None,
+                    "metadata": {
+                        "trace_length": len(result.get("trace", [])),
+                    },
+                }
+            )
+
+            await hydro_client.save_conversation_messages(events)
+        except Exception as exc:  # pragma: no cover - defensive logging
+            logger.warning("Failed to persist manual conversation: %s", exc)
+
+    return response
 
 
 # Automation Rules Management Endpoints (No AI Protection - For Human Use)
