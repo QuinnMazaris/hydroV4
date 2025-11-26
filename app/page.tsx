@@ -13,8 +13,8 @@ import { useWsSensors } from "@/hooks/use-ws-metrics"
 import { CameraFeed } from "@/components/camera-feed"
 import { useCameras } from "@/hooks/use-cameras"
 import { cn } from "@/lib/utils"
-import { ActuatorDeviceGrid } from "@/components/actuator-device-grid"
 import type { ActuatorCard } from "@/components/actuator-device-grid"
+import { DeviceToggle } from "@/components/device-toggle"
 import { normalizeActuatorState, useActuatorQueue } from "@/hooks/use-actuator-queue"
 import { AppHeader } from "@/components/app-header"
 
@@ -255,38 +255,23 @@ export default function Dashboard() {
         <AppHeader connectionStatus={status} />
 
         <div className="flex-1 px-4 md:px-8 lg:px-12 py-8">
-          {/* Camera Feeds - Dynamically loaded from MediaMTX */}
-          <div className="mb-8 space-y-4">
-            {cameraError && (
-              <div className="rounded-lg border border-destructive/40 bg-destructive/10 px-4 py-3 text-sm text-destructive">
-                {cameraError}
-              </div>
-            )}
-            {camerasLoading ? (
-              <Card className="border-white/10 bg-black/40">
-                <CardContent className="py-6">
-                  <p className="text-sm text-muted-foreground">Loading camera feeds…</p>
-                </CardContent>
-              </Card>
-            ) : cameras.length > 0 ? (
-              <div className="space-y-6">
-                {cameras.map((camera) => (
-                  <CameraFeed key={camera.device_key} deviceKey={camera.device_key} />
-                ))}
-              </div>
-            ) : (
-              <Card className="border-white/10 bg-black/40">
-                <CardContent className="py-6">
-                  <p className="text-sm text-muted-foreground">
-                    No cameras discovered. Confirm MediaMTX paths and camera sync are configured.
-                  </p>
-                </CardContent>
-              </Card>
-            )}
-          </div>
+          {/* Camera error banner */}
+          {cameraError && (
+            <div className="mb-4 rounded-lg border border-destructive/40 bg-destructive/10 px-4 py-3 text-sm text-destructive">
+              {cameraError}
+            </div>
+          )}
 
-          {/* Metrics Grid */}
-          <div className="mb-8 grid grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+          {/* Unified Grid: Cameras (2x2) → Sensors → Actuators */}
+          <div className="mb-8 grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6 gap-3">
+            {/* Cameras - each takes 2x2 grid cells */}
+            {!camerasLoading && cameras.map((camera) => (
+              <div key={camera.device_key} className="col-span-2 row-span-2">
+                <CameraFeed deviceKey={camera.device_key} />
+              </div>
+            ))}
+
+            {/* Sensor Cards */}
             {cards.map((c) => (
               <MetricCard
                 key={c.key}
@@ -300,13 +285,41 @@ export default function Dashboard() {
                 yDomain={c.yDomain}
               />
             ))}
-          </div>
 
-          <ActuatorDeviceGrid
-            devices={actuatorDevices}
-            controlModes={controlModes}
-            onToggle={handleActuatorToggle}
-          />
+            {/* Actuator Buttons - inline with sensors */}
+            {actuatorDevices.flatMap(({ deviceId, actuators }) =>
+              actuators.map((actuator) => {
+                const busyKey = `${deviceId}:${actuator.key}`
+                const isOn = actuator.currentState === "on"
+                const label = actuator.label || actuator.key
+                const mode = controlModes[deviceId]?.[actuator.key] || "manual"
+                const isAutoMode = mode === "auto"
+
+                return (
+                  <div key={busyKey} className="relative group">
+                    <div className={cn(isAutoMode && "opacity-50 pointer-events-none")}>
+                      <DeviceToggle
+                        id={busyKey}
+                        label={label}
+                        checked={isOn}
+                        onToggle={() => handleActuatorToggle(deviceId, actuator)}
+                      />
+                    </div>
+                    {/* Mode badge */}
+                    <div 
+                      className={cn(
+                        "absolute top-1 left-1 px-1.5 py-0.5 rounded text-[10px] font-bold text-white",
+                        isAutoMode ? "bg-blue-500" : "bg-orange-500"
+                      )}
+                      title={isAutoMode ? "AI + Automation control" : "Manual override"}
+                    >
+                      {isAutoMode ? "🤖" : "⚠️"}
+                    </div>
+                  </div>
+                )
+              })
+            )}
+          </div>
 
           <div className="space-y-6">
             {recentErrors.length > 0 && (

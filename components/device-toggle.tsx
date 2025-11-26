@@ -72,13 +72,13 @@ export function DeviceToggle({ id, label, checked, disabled = false, onToggle }:
       }}
     >
       <div className="flex h-full flex-col">
-        <div className="flex-1 min-h-0 p-3 flex items-center justify-center">
+        <div className="flex-1 min-h-0 p-2 flex items-center justify-center">
           <div className="w-full h-full flex items-center justify-center">
             <PlantAnimation isActive={checked} id={id} />
           </div>
         </div>
-        <div className="px-3 pb-3">
-          <h3 className="text-sm sm:text-base font-semibold text-foreground truncate text-center leading-tight">
+        <div className="px-2 pb-2">
+          <h3 className="text-xs font-semibold text-foreground truncate text-center leading-tight">
             {label}
           </h3>
         </div>

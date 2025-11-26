@@ -46,7 +46,7 @@ export function ActuatorDeviceGrid({ devices, controlModes, onToggle, forceOverr
               {actuators.length} actuator{actuators.length === 1 ? "" : "s"}
             </span>
           </div>
-          <div className="grid gap-6 grid-cols-2 md:grid-cols-4 lg:grid-cols-6">
+          <div className="grid gap-3 grid-cols-4 sm:grid-cols-5 md:grid-cols-6 lg:grid-cols-8">
             {actuators.map((actuator) => {
               const busyKey = `${deviceId}:${actuator.key}`
               const isOn = actuator.currentState === "on"
@@ -68,26 +68,20 @@ export function ActuatorDeviceGrid({ devices, controlModes, onToggle, forceOverr
                     />
                   </div>
 
-                  {/* Mode badge */}
+                  {/* Mode badge - compact for smaller cards */}
                   {isAutoMode ? (
                     <div 
-                      className="absolute top-2 left-2 px-2 py-1 bg-blue-500 rounded text-xs font-bold text-white"
+                      className="absolute top-1 left-1 px-1.5 py-0.5 bg-blue-500 rounded text-[10px] font-bold text-white"
                       title="AI + Automation control (normal operation)"
                     >
-                      <span className="flex items-center gap-1">
-                        <Bot className="h-3.5 w-3.5" aria-hidden />
-                        AI
-                      </span>
+                      <Bot className="h-3 w-3" aria-hidden />
                     </div>
                   ) : (
                     <div 
-                      className="absolute top-2 left-2 px-2 py-1 bg-orange-500 rounded text-xs font-bold text-white"
+                      className="absolute top-1 left-1 px-1.5 py-0.5 bg-orange-500 rounded text-[10px] font-bold text-white"
                       title="Manual override - AI/automation blocked"
                     >
-                      <span className="flex items-center gap-1">
-                        <AlertTriangle className="h-3.5 w-3.5" aria-hidden />
-                        MANUAL
-                      </span>
+                      <AlertTriangle className="h-3 w-3" aria-hidden />
                     </div>
                   )}
                   
