@@ -128,14 +128,23 @@ export default function Dashboard() {
 
   const recentErrors = useMemo(() => errors.slice(-5).reverse(), [errors])
 
-  // Fetch control modes on mount
+  // Fetch control modes on mount and listen for changes from header
   useEffect(() => {
-    fetch('/api/actuators/modes')
-      .then(res => res.json())
-      .then((data: { modes?: Record<string, Record<string, 'auto' | 'manual'>> }) => {
-        setControlModes(data.modes || {})
-      })
-      .catch(err => console.error('Failed to fetch control modes:', err))
+    const fetchModes = () => {
+      fetch('/api/actuators/modes')
+        .then(res => res.json())
+        .then((data: { modes?: Record<string, Record<string, 'auto' | 'manual'>> }) => {
+          setControlModes(data.modes || {})
+        })
+        .catch(err => console.error('Failed to fetch control modes:', err))
+    }
+    
+    fetchModes()
+    
+    // Listen for mode changes from header (event-based, no polling)
+    const handleModeChange = () => fetchModes()
+    window.addEventListener("actuator-mode-changed", handleModeChange)
+    return () => window.removeEventListener("actuator-mode-changed", handleModeChange)
   }, [])
 
   const handleActuatorToggle = (deviceId: string, actuator: ActuatorInfo) => {
@@ -295,30 +304,22 @@ export default function Dashboard() {
                 const mode = controlModes[deviceId]?.[actuator.key] || "manual"
                 const isAutoMode = mode === "auto"
 
-                return (
-                  <div key={busyKey} className="relative group">
-                    <div className={cn(isAutoMode && "opacity-50 pointer-events-none")}>
-                      <DeviceToggle
-                        id={busyKey}
-                        label={label}
-                        checked={isOn}
-                        onToggle={() => handleActuatorToggle(deviceId, actuator)}
-                      />
-                    </div>
-                    {/* Mode badge */}
-                    <div 
-                      className={cn(
-                        "absolute top-1 left-1 px-1.5 py-0.5 rounded text-[10px] font-bold text-white",
-                        isAutoMode ? "bg-blue-500" : "bg-orange-500"
-                      )}
-                      title={isAutoMode ? "AI + Automation control" : "Manual override"}
-                    >
-                      {isAutoMode ? "🤖" : "⚠️"}
-                    </div>
-                  </div>
-                )
-              })
-            )}
+              return (
+                <div 
+                  key={busyKey} 
+                  className={cn(isAutoMode && "opacity-50 pointer-events-none")}
+                  title={isAutoMode ? "AI Control - switch to Manual to control" : ""}
+                >
+                  <DeviceToggle
+                    id={busyKey}
+                    label={label}
+                    checked={isOn}
+                    onToggle={() => handleActuatorToggle(deviceId, actuator)}
+                  />
+                </div>
+              )
+            })
+          )}
           </div>
 
           <div className="space-y-6">
@@ -344,43 +345,6 @@ export default function Dashboard() {
               </Card>
             )}
 
-            <Card className="bg-black/50 border-white/10 backdrop-blur-xl shadow-xl">
-              <CardHeader>
-                <CardTitle className="text-lg font-semibold text-foreground">Device Overview</CardTitle>
-              </CardHeader>
-              <CardContent className="space-y-4">
-                {deviceActivities.length === 0 ? (
-                  <div className="text-sm text-muted-foreground">No recent device activity yet.</div>
-                ) : (
-                  deviceActivities.map((activity) => {
-                    const statusColor = activity.isActive
-                      ? "bg-chart-1"
-                      : activity.ageMs < 60 * 60 * 1000
-                        ? "bg-chart-3"
-                        : "bg-destructive"
-
-                    return (
-                      <div
-                        key={activity.deviceId}
-                        className="flex items-center justify-between rounded-xl border border-white/10 bg-black/40 p-3 backdrop-blur transition-colors hover:bg-black/30"
-                      >
-                        <div className="flex items-center space-x-3">
-                          <div className={`h-2 w-2 rounded-full ${statusColor}`}></div>
-                          <div className="flex flex-col">
-                            <span className="text-sm text-foreground">{activity.deviceId}</span>
-                            <span className="text-xs text-muted-foreground">{activity.deviceType}</span>
-                          </div>
-                        </div>
-                        <div className="flex items-center space-x-2">
-                          <span className="text-xs text-muted-foreground">{formatRelativeTime(activity.lastSeen)}</span>
-                          <ChevronRight className="h-3 w-3 text-muted-foreground" />
-                        </div>
-                      </div>
-                    )
-                  })
-                )}
-              </CardContent>
-            </Card>
           </div>
         </div>
       </div>

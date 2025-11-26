@@ -70,6 +70,8 @@ export function AppHeader({ connectionStatus, onClearChat, hasMessages }: AppHea
 
       if (res.ok) {
         setGlobalMode(newMode)
+        // Dispatch event so other components can react to mode change
+        window.dispatchEvent(new CustomEvent("actuator-mode-changed", { detail: { mode: newMode } }))
       } else {
         throw new Error("Failed to change mode")
       }

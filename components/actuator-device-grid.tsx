@@ -59,14 +59,12 @@ export function ActuatorDeviceGrid({ devices, controlModes, onToggle, forceOverr
 
               return (
                 <div key={busyKey} className="relative group">
-                  <div className={cn(isUserBlocked && "opacity-50 pointer-events-none")}>
-                    <DeviceToggle
-                      id={busyKey}
-                      label={label}
-                      checked={isOn}
-                      onToggle={() => onToggle(deviceId, actuator)}
-                    />
-                  </div>
+                  <DeviceToggle
+                    id={busyKey}
+                    label={label}
+                    checked={isOn}
+                    onToggle={() => onToggle(deviceId, actuator)}
+                  />
 
                   {/* Mode badge - compact for smaller cards */}
                   {isAutoMode ? (
@@ -87,11 +85,15 @@ export function ActuatorDeviceGrid({ devices, controlModes, onToggle, forceOverr
                   
                   {/* Blocked indicator for AUTO mode */}
                   {isUserBlocked && (
-                    <div className="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity">
-                      <span className="bg-black/80 text-white text-xs px-2 py-1 rounded">
-                        Switch to Manual to control
-                      </span>
-                    </div>
+                    <>
+                      <div className="absolute inset-0 bg-black/45 rounded-[inherit]" aria-hidden />
+                      <div className="absolute inset-0 pointer-events-none flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity">
+                        <span className="bg-black/80 text-white text-xs px-2 py-1 rounded">
+                          Switch to Manual to control
+                        </span>
+                      </div>
+                      <div className="absolute inset-0 pointer-events-auto" onClick={(e) => e.stopPropagation()} />
+                    </>
                   )}
                 </div>
               )

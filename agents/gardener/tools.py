@@ -79,10 +79,9 @@ class ToolRegistry:
                 "control_actuators": ToolSpec(
                     name="control_actuators",
                     description=(
-                        "Toggle actuators on hydro devices. Commands are subject to mode restrictions: "
-                        "AUTO mode = AI can control (normal operation), "
-                        "MANUAL mode = AI blocked (user emergency override). "
-                        "If a command is blocked, you'll see it in the 'blocked' response field."
+                        "Turn actuators (relays, pumps, lights) on or off. "
+                        "Use state='on' to turn on, state='off' to turn off. "
+                        "Common actuators: relay1-relay8 on hydro-station-1."
                     ),
                     input_schema={
                         "type": "object",
@@ -93,11 +92,12 @@ class ToolRegistry:
                                     "type": "object",
                                     "required": ["device_id", "actuator_key", "state"],
                                     "properties": {
-                                        "device_id": {"type": "string"},
-                                        "actuator_key": {"type": "string"},
+                                        "device_id": {"type": "string", "description": "Device key, e.g. hydro-station-1"},
+                                        "actuator_key": {"type": "string", "description": "Actuator key, e.g. relay1, relay2, etc."},
                                         "state": {
                                             "type": "string",
                                             "enum": ["on", "off"],
+                                            "description": "on = turn on, off = turn off"
                                         },
                                     },
                                     "additionalProperties": False,
@@ -279,21 +279,6 @@ class ToolRegistry:
                         "additionalProperties": False,
                     },
                     handler=self._handle_toggle_automation_rule,
-                ),
-                "set_actuator_mode": ToolSpec(
-                    name="set_actuator_mode",
-                    description="Set the control mode (manual/auto) for a specific actuator.",
-                    input_schema={
-                        "type": "object",
-                        "properties": {
-                            "device_key": {"type": "string", "description": "Device key (e.g. hydro-station-1)"},
-                            "actuator_key": {"type": "string", "description": "Actuator key (e.g. relay1)"},
-                            "mode": {"type": "string", "enum": ["manual", "auto"], "description": "Control mode"}
-                        },
-                        "required": ["device_key", "actuator_key", "mode"],
-                        "additionalProperties": False,
-                    },
-                    handler=self._handle_set_actuator_mode,
                 ),
             }
 

@@ -59,17 +59,14 @@ export function DeviceToggle({ id, label, checked, disabled = false, onToggle }:
   return (
     <Card
       className={cn(
-        "w-full aspect-square p-0 overflow-hidden cursor-pointer border-white/10 backdrop-blur-xl shadow-xl select-none active:scale-95 transition-transform duration-100",
+        "w-full aspect-square p-0 overflow-hidden cursor-pointer backdrop-blur-xl shadow-xl select-none active:scale-95 transition-transform duration-100",
         disabled && "cursor-not-allowed opacity-50",
         checked
-          ? "bg-emerald-950/30 border-emerald-400/30"
-          : "bg-black/55"
+          ? "bg-emerald-900/40 border-emerald-500/20"
+          : "bg-black/50 border-white/5"
       )}
       onClick={handleClick}
-      style={{
-        backgroundColor: checked ? "rgba(16, 185, 129, 0.1)" : "rgba(0, 0, 0, 0.55)",
-        touchAction: "manipulation"
-      }}
+      style={{ touchAction: "manipulation" }}
     >
       <div className="flex h-full flex-col">
         <div className="flex-1 min-h-0 p-2 flex items-center justify-center">
